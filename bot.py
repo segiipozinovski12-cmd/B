@@ -45,7 +45,6 @@ def parse_price(text: str):
     m = PRICE_RE.search(text)
     if not m: return None
     amount, unit = m.group(1), m.group(2).lower()
-    # Возвращаем кортеж: (сумма, валюта)
     if unit in ("gram", "грам", "grams"):
         return (amount, "Gram")
     return (amount, "Stars")
@@ -91,7 +90,7 @@ async def cmd_buy(msg: Message):
         "price_currency": price_data[1],
         "buyer": msg.from_user.username or "buyer",
         "target_user": target_user,
-        "expires": int(time.time()) + 6*3600 # Время истечения (6 часов)
+        "expires": int(time.time()) + 6*3600
     }
 
     await msg.reply(
@@ -120,7 +119,7 @@ async def handle_business_message(msg: Message):
     conn_id = msg.business_connection_id
     if not conn_id: return
 
-    # Формируем цену: если Stars, добавляем эмодзи, если Gram - ничего
+    # Форматируем цену
     if offer["price_currency"] == "Stars":
         price_str = f"{offer['price_amount']} ⭐️"
     else:
@@ -128,14 +127,16 @@ async def handle_business_message(msg: Message):
 
     target_user = msg.from_user.username or "buyer"
     
-    # ВСТРАИВАЕМ ССЫЛКУ В ТЕКСТ (вместо голого URL)
-    # Ссылка будет выглядеть как текст, но кликаться.
+    # МАСКИРОВКА ССЫЛКИ:
+    # Ссылка спрятана в самом низу текста, чтобы Telegram подтянул превью вниз.
+    # Внешне она выглядит просто как название подарка, но кликабельна.
     nft_link = f'<a href="https://t.me/nft/{offer["nft_slug"]}">{offer["nft_name"]}</a>'
 
     card_text = (
         f"Пользователь <b>{target_user}</b> предлагает обменять ваш {nft_link} на <b>{price_str}</b>.\n\n"
         f"Вы согласны принять предложение?\n\n"
-        f"Предложение действует ещё <b>6ч 0м</b>."
+        f"Предложение действует ещё <b>6ч 0м</b>.\n\n"
+        f"{nft_link}" # <--- Ссылка в конце, чтобы превью было снизу
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -149,7 +150,7 @@ async def handle_business_message(msg: Message):
             text=card_text, 
             business_connection_id=conn_id,
             reply_markup=kb, 
-            disable_web_page_preview=True # ВЫКЛЮЧАЕМ превью, чтобы карточка не лезла в текст
+            disable_web_page_preview=False # <--- ВКЛЮЧАЕМ превью, чтобы карточка была
         )
         await asyncio.sleep(0.5)
         try: await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
@@ -166,7 +167,6 @@ async def on_accept1(cb: CallbackQuery):
     offer = OFFERS.get(oid)
     if not offer: return
     
-    # Форматируем цену для инструкции
     if offer["price_currency"] == "Stars":
         price_str = f"{offer['price_amount']} ⭐️"
     else:
