@@ -200,4 +200,13 @@ async def main():
 
 
 if __name__ == "__main__":
+    import threading
+    from app import flask_app
+
+    def _flask():
+        port = int(os.getenv("PORT", "8080"))
+        flask_app.run(host="0.0.0.0", port=port, threaded=True,
+                      use_reloader=False)
+
+    threading.Thread(target=_flask, daemon=True).start()
     asyncio.run(main())
