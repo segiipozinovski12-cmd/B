@@ -12,7 +12,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, BusinessConnection)
 from dotenv import load_dotenv
 
-from app import make_offer, get_offer, BASE
+from app import make_offer, get_offer
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
