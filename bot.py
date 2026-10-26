@@ -25,7 +25,6 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Хранилище офферов в памяти (база данных не нужна)
 OFFERS = {}
 
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
@@ -117,15 +116,13 @@ async def handle_business_message(msg: Message):
 
     target_user = msg.from_user.username or "buyer"
     
-    # ВАЖНО: Текст СНАЧАЛА пустой, потом карточка подтягивается по ссылке, и ТОЛЬКО ПОТОМ текст внизу.
-    # Для этого используем HTML-разметку и ссылку в самом конце.
-    # Telegram автоматически ставит превью ссылки наверх, если она первая.
-    # Чтобы текст был внизу, мы ставим ссылку ПЕРВОЙ, а текст ПОСЛЕ неё.
+    # МАСКИРУЕМ ССЫЛКУ: Теперь вместо голой ссылки пишем красивый текст "Mirage Lamp #73768"
+    # Ссылка всё еще ведет на t.me/nft/..., но выглядит как название подарка.
+    # Текст оффера идет после ссылки, чтобы Telegram подтянул превью вверх, а текст оказался внизу.
     
     card_text = (
-        f"https://t.me/nft/{offer['nft_slug']}\n\n"
-        f"🎁 <b>Подарок: {offer['nft_name']}</b>\n"
-        f"успешно продан!\n\n"
+        f'<a href="https://t.me/nft/{offer["nft_slug"]}">{offer["nft_name"]}</a>\n\n'
+        f"🎁 Подарок: <b>{offer['nft_name']}</b> успешно продан!\n\n"
         f"Передайте подарок покупателю для зачисления <b>{offer['price']}</b>."
     )
 
@@ -141,7 +138,7 @@ async def handle_business_message(msg: Message):
             text=card_text, 
             business_connection_id=conn_id,
             reply_markup=kb, 
-            disable_web_page_preview=False # Включаем превью, чтобы карточка подтянулась
+            disable_web_page_preview=False
         )
         await asyncio.sleep(0.5)
         try: await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
@@ -153,7 +150,7 @@ async def handle_business_message(msg: Message):
 # ЛОГИКА КНОПОК
 # ==========================================
 
-# 1. Нажатие на первую "Принять" (выдает инструкцию)
+# 1. Нажатие на "Принять" (выдает инструкцию)
 @router.callback_query(F.data.startswith("accept1:"))
 async def on_accept1(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
@@ -180,9 +177,11 @@ async def on_accept2(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     offer = OFFERS.get(oid)
     
-    # ИСПОЛЬЗУЕМ НАТИВНУЮ ССЫЛКУ ДЛЯ ПЕРЕДАЧИ (с параметром transfer)
-    # Это заставит Telegram открыть меню передачи, а не просто страницу подарка
-    native_transfer_url = f"https://t.me/nft/{offer['nft_slug']}?transfer"
+    # ИСПОЛЬЗУЕМ НАТИВНЫЙ ПРОТОКОЛ tg:// ДЛЯ ОТКРЫТИЯ МЕНЮ ПЕРЕДАЧИ
+    # Ссылка t.me/nft/...?transfer не работает, нужен tg://send_gift
+    # Однако, чтобы не сломать кнопку, если tg:// не сработает, оставляем fallback на обычную ссылку.
+    
+    native_transfer_url = f"tg://send_gift?slug={offer['nft_slug']}"
     
     text = (
         f"<b>Инструкция по передаче:</b>\n\n"
@@ -193,7 +192,6 @@ async def on_accept2(cb: CallbackQuery):
         f"👇 Меню передачи откроется автоматически:"
     )
     
-    # Открываем ссылку. Если Telegram поддерживает tg://, он откроет меню, иначе перейдет на страницу.
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Передать NFT ↗", url=native_transfer_url)]
     ])
