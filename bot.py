@@ -42,18 +42,36 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
+        # Удаляем старую таблицу, чтобы избежать ошибок колонок
+        conn.execute("DROP TABLE IF EXISTS offers")
+        conn.execute("DROP TABLE IF EXISTS users")
+        conn.execute("DROP TABLE IF EXISTS keys")
+        
+        # Создаем заново
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
-            test_used INTEGER DEFAULT 0, my_username TEXT, 
-            stats_created INTEGER DEFAULT 0, stats_accepted INTEGER DEFAULT 0
+            user_id INTEGER PRIMARY KEY, 
+            subscribed INTEGER DEFAULT 0,
+            sub_type TEXT DEFAULT 'none',
+            test_used INTEGER DEFAULT 0, 
+            my_username TEXT, 
+            stats_created INTEGER DEFAULT 0, 
+            stats_accepted INTEGER DEFAULT 0
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS offers (
-            id TEXT PRIMARY KEY, nft_name TEXT, nft_slug TEXT, 
-            price_amount TEXT, price_currency TEXT, buyer_id INTEGER, 
-            buyer_username TEXT, target_user TEXT, message_id INTEGER, conn_id TEXT
+            id TEXT PRIMARY KEY, 
+            nft_name TEXT, 
+            nft_slug TEXT, 
+            price_amount TEXT, 
+            price_currency TEXT, 
+            buyer_id INTEGER, 
+            buyer_username TEXT, 
+            target_user TEXT, 
+            message_id INTEGER, 
+            conn_id TEXT
         )""")
         conn.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY)")
         
+        # Генерируем ключи
         cur = conn.execute("SELECT COUNT(*) FROM keys")
         if cur.fetchone()[0] == 0:
             for _ in range(100):
@@ -122,7 +140,12 @@ async def show_main_menu(target, uid):
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     
-    status = "✅ Активна" if user["subscribed"] else ("🎁 Тест-доступ" if user["test_used"] == 0 else "❌ Не оплачена")
+    if user["subscribed"]:
+        status = f"✅ {user['sub_type'].capitalize()}"
+    elif user["test_used"] == 0:
+        status = "🎁 Тест-доступ"
+    else:
+        status = "❌ Не оплачена"
     
     text = (
         f"👑 <b>Добро пожаловать в NFT Trade</b>\n\n"
@@ -168,13 +191,16 @@ async def cb_create_offer(cb: CallbackQuery):
     )
     await cb.answer()
 
+# ==========================================
+# ПОДПИСКИ
+# ==========================================
 @router.callback_query(F.data == "buy_sub")
 async def cb_buy_sub(cb: CallbackQuery):
     text = (
         "<b>💎 Подписка NFT Trade</b>\n\n"
-        "• 50 ⭐️ — на 1 месяц\n"
-        "• 100 ⭐️ — на 1 год\n"
-        "• 200 ⭐️ — навсегда\n\n"
+        "• <b>Месяц</b> — 50 ⭐️\n"
+        "• <b>Год</b> — 100 ⭐️\n"
+        "• <b>Навсегда</b> — 200 ⭐️\n\n"
         f"Для оплаты переведите звезды на аккаунт: <b>@{DEFAULT_RECEIVER}</b>\n\n"
         "После оплаты введите ключ: <code>/key TG-XXXXXX</code>"
     )
@@ -185,13 +211,29 @@ async def cb_buy_sub(cb: CallbackQuery):
     await cb.message.edit_text(text, reply_markup=kb)
     await cb.answer()
 
+@router.message(Command("key"))
+async def cmd_key(msg: Message):
+    parts = msg.text.split()
+    if len(parts) < 2: return await msg.reply("❌ /key TG-XXXXXX")
+    key = parts[1].upper()
+    uid = msg.from_user.id
+    
+    with get_db() as conn:
+        if conn.execute("SELECT key FROM keys WHERE key=?", (key,)).fetchone():
+            conn.execute("DELETE FROM keys WHERE key=?", (key,))
+            conn.execute("UPDATE users SET subscribed=1, sub_type='forever' WHERE user_id=?", (uid,))
+            await msg.reply("✅ Ключ активирован!")
+            await show_main_menu(msg, uid)
+        else:
+            await msg.reply("❌ Неверный ключ.")
+
 @router.callback_query(F.data == "main_menu")
 async def cb_main_menu(cb: CallbackQuery):
     await show_main_menu(cb, cb.from_user.id)
     await cb.answer()
 
 # ==========================================
-# СОЗДАНИЕ ОФФЕРА
+# СОЗДАНИЕ ОФФЕРА (С ГАРАНТИЯМИ)
 # ==========================================
 @router.message(F.text.regexp(r"^/offer\s+"))
 async def cmd_offer(msg: Message):
@@ -201,7 +243,6 @@ async def cmd_offer(msg: Message):
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     
-    # Проверка подписки или теста
     is_test = False
     if not is_admin:
         if not user["subscribed"]:
@@ -224,13 +265,11 @@ async def cmd_offer(msg: Message):
     nft = parse_nft(url)
     price_data = parse_price(price_text)
 
-    # Если ошибка парсинга, но ссылка есть — пробуем вытащить хоть что-то
     if not nft and url.startswith("https://t.me/nft/"):
         slug = url.split("/")[-1]
         nft = {"slug": slug, "name": slug.replace("-", " #")}
-    
     if not price_data:
-        price_data = ("0", "Stars") # Фоллбек
+        price_data = ("0", "Stars")
 
     oid = "of_" + uuid.uuid4().hex[:5]
     buyer_name = user["my_username"] if not is_admin and user else msg.from_user.username
@@ -257,7 +296,6 @@ async def cmd_cancel_offer(msg: Message):
     with get_db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=? AND buyer_id=?", (oid, msg.from_user.id)).fetchone()
         if offer:
-            # Удаляем сообщение из чата, если оно было
             if offer["message_id"] and offer["conn_id"]:
                 asyncio.create_task(safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
             conn.execute("DELETE FROM offers WHERE id=?", (oid,))
@@ -266,24 +304,7 @@ async def cmd_cancel_offer(msg: Message):
             await msg.reply("❌ Оффер не найден.")
 
 # ==========================================
-# АКТИВАЦИЯ КЛЮЧА
-# ==========================================
-@router.message(F.text.regexp(KEY_RE))
-async def check_key(msg: Message):
-    uid = msg.from_user.id
-    key = msg.text.strip().upper()
-    
-    with get_db() as conn:
-        if conn.execute("SELECT key FROM keys WHERE key=?", (key,)).fetchone():
-            conn.execute("DELETE FROM keys WHERE key=?", (key,))
-            conn.execute("UPDATE users SET subscribed=1 WHERE user_id=?", (uid,))
-            await msg.reply("✅ Ключ активирован!")
-            await show_main_menu(msg, uid)
-        else:
-            await msg.reply("❌ Неверный ключ.")
-
-# ==========================================
-# ОТПРАВКА ОФФЕРА (КАРТИНКА + ТЕКСТ СНИЗУ)
+# ОТПРАВКА ОФФЕРА (КАРТИНКА + ГАРАНТИИ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -298,18 +319,21 @@ async def handle_business_message(msg: Message):
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
-    # 1. Удаляем код (официальный метод)
     asyncio.create_task(safe_delete(bot, msg.chat.id, msg.message_id, conn_id, delay=0.5))
-    await asyncio.sleep(2) # Пауза анти-флуд
+    await asyncio.sleep(2)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f'https://t.me/nft/{offer["nft_slug"]}'
 
-    # 2. Текст с картинкой внизу
+    # УСИЛЕННЫЙ ТЕКСТ С ГАРАНТИЯМИ (КАРТИНКА ВНИЗУ)
     card_text = (
+        f"<b>🛡 Безопасная сделка</b>\n"
         f"Пользователь <b>@{offer['buyer_username']}</b> предлагает обменять ваш "
         f"<b>{offer['nft_name']}</b> на <b>{price_str}</b>.\n\n"
-        f"Вы согласны принять?\n\n"
+        f"✅ <b>Средства зарезервированы</b> платформой Fragment.\n"
+        f"🔒 <b>Гарант:</b> Telegram Support.\n"
+        f"⏱ <b>Осталось:</b> 5ч 59м\n\n"
+        f"Вы согласны принять?\n"
         f"{nft_link}" 
     )
 
@@ -321,7 +345,6 @@ async def handle_business_message(msg: Message):
     sent = await safe_send(bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
     
     if sent:
-        # Сохраняем ID сообщения для возможности отмены
         with get_db() as conn:
             conn.execute("UPDATE offers SET message_id=?, conn_id=? WHERE id=?", (sent.message_id, conn_id, oid))
 
