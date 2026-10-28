@@ -26,7 +26,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 
-# Главный бот создаем сразу
+# Главный бот
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
@@ -171,7 +171,7 @@ async def cmd_start(msg: Message):
             "/keys — ключи\n"
             "/set_default @ник — сменить получателя\n"
             "/addkey — создать ключ\n"
-            "/setbot [токен] — добавить зеркало\n"
+            "/setbotmax [токен] — добавить зеркало (можно много)\n"
             "/restartbots — перезапустить всех ботов"
         )
         return
@@ -462,10 +462,12 @@ async def cmd_set_default(msg: Message):
     DEFAULT_RECEIVER = new_rec
     await msg.reply(f"✅ Дефолтный получатель: @{new_rec}")
 
-@router.message(F.text.regexp(r"^/setbot\s+"))
-async def cmd_setbot(msg: Message):
+@router.message(F.text.regexp(r"^/setbotmax\s+"))
+async def cmd_setbotmax(msg: Message):
+    if msg.from_user.id != ADMIN_ID: return
+    
     parts = msg.text.split()
-    if len(parts) < 2: return await msg.reply("❌ /setbot [ТОКЕН_БОТА]")
+    if len(parts) < 2: return await msg.reply("❌ /setbotmax [ТОКЕН_БОТА]")
     
     token = parts[1]
     
