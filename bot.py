@@ -14,7 +14,8 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, BusinessConnection)
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+# ИСПРАВЛЕНО: добавлен TelegramUnauthorizedError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramUnauthorizedError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,7 +32,6 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# ВОЗВРАЩАЕМ СЛОВАРЬ BUSINESS_CONNS
 BUSINESS_CONNS = {}
 
 # ==========================================
@@ -355,7 +355,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (ГЛАВНЫЙ ФИКС)
+# ОТПРАВКА ОФФЕРА (ФИНАЛ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -375,7 +375,6 @@ async def handle_business_message(msg: Message):
         log.error("❌ Чужой отправитель")
         return
 
-    # БЕРЕМ conn_id ИЗ СООБЩЕНИЯ ИЛИ ИЗ БАЗЫ
     conn_id = getattr(msg, "business_connection_id", None)
     
     if not conn_id:
@@ -385,7 +384,7 @@ async def handle_business_message(msg: Message):
             conn_id = row["conn_id"]
 
     if not conn_id: 
-        log.error("❌ Нет conn_id ни в сообщении, ни в базе")
+        log.error("❌ Нет conn_id")
         return
 
     await delete_code_message(msg.bot, msg.chat.id, msg.message_id, conn_id)
@@ -541,7 +540,6 @@ async def main():
             bots_to_start.append(m_bot)
             log.info(f"🚀 Загружено зеркало: @{m['username']}")
         except TelegramUnauthorizedError:
-            # Если токен не работает (Unauthorized), удаляем его из базы
             log.error(f"❌ Токен @{m['username']} недействителен. Удаляю из базы.")
             with get_db() as conn:
                 conn.execute("DELETE FROM mirrors WHERE id=?", (m["id"],))
