@@ -42,7 +42,6 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Таблица для Business подключений (чтобы conn_id не терялся)
         conn.execute("""CREATE TABLE IF NOT EXISTS business_conns (
             user_id INTEGER PRIMARY KEY, conn_id TEXT
         )""")
@@ -352,7 +351,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (ССЫЛКА СВЕРХУ)
+# ОТПРАВКА ОФФЕРА (ГЛАВНЫЙ ФИКС)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -372,14 +371,19 @@ async def handle_business_message(msg: Message):
         log.error("❌ Чужой отправитель")
         return
 
-    with get_db() as conn:
-        row = conn.execute("SELECT conn_id FROM business_conns WHERE user_id=?", (msg.from_user.id,)).fetchone()
+    # 1. Сначала пытаемся взять conn_id из самого сообщения (это самый надежный способ)
+    conn_id = getattr(msg, "business_connection_id", None)
     
-    if not row: 
-        log.error("❌ Нет conn_id в базе данных")
+    # 2. Если в сообщении его нет, лезем в базу данных
+    if not conn_id:
+        with get_db() as db_conn:
+            row = db_conn.execute("SELECT conn_id FROM business_conns WHERE user_id=?", (msg.from_user.id,)).fetchone()
+        if row:
+            conn_id = row["conn_id"]
+
+    if not conn_id: 
+        log.error("❌ Нет conn_id ни в сообщении, ни в базе")
         return
-    
-    conn_id = row["conn_id"]
 
     await delete_code_message(msg.bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
@@ -387,7 +391,6 @@ async def handle_business_message(msg: Message):
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
-    # ССЫЛКА НА NFT В САМОМ НАЧАЛЕ (картинка подтянется сверху)
     card_text = (
         f"{nft_link}\n\n" 
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
