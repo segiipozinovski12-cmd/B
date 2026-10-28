@@ -26,7 +26,6 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 
-# Главный бот
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
@@ -43,6 +42,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
+        # Таблицу users НЕ удаляем, чтобы подписки не слетели
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
             sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
@@ -219,7 +219,6 @@ async def cb_settings(cb: CallbackQuery):
         f"▪️ <code>/offer [ссылка] [цена] [@юзер]</code> — создать оффер\n"
         f"▪️ <code>/key TG-XXXXXX</code> — активировать подписку\n"
         f"▪️ <code>/cancel_of_XXXXX</code> — отменить оффер\n"
-        f"▪️ <code>/setbot [токен]</code> — добавить зеркало\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]])
     await cb.message.edit_text(text, reply_markup=kb)
@@ -473,6 +472,9 @@ async def cmd_setbotmax(msg: Message):
     
     try:
         temp_bot = Bot(token=token)
+        # УДАЛЯЕМ ВЕБХУК ПРИ ДОБАВЛЕНИИ, ЧТОБЫ НЕ БЫЛО КОНФЛИКТА
+        await temp_bot.delete_webhook(drop_pending_updates=True)
+        
         me = await temp_bot.get_me()
         username = me.username
         
@@ -493,7 +495,7 @@ async def cmd_restartbots(msg: Message):
     os._exit(0) 
 
 # ==========================================
-# ЗАПУСК ВСЕХ БОТОВ (МУЛЬТИБОТ РЕЖИМ)
+# ЗАПУСК ВСЕХ БОТОВ (БЕЗ КОНФЛИКТОВ)
 # ==========================================
 async def main():
     log.info("Starting all bots...")
@@ -506,10 +508,15 @@ async def main():
     for m in mirrors:
         try:
             m_bot = Bot(token=m["token"], default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            # УДАЛЯЕМ ВЕБХУК ДЛЯ КАЖДОГО ЗЕРКАЛА
+            await m_bot.delete_webhook(drop_pending_updates=True)
             bots_to_start.append(m_bot)
             log.info(f"🚀 Загружено зеркало: @{m['username']}")
         except Exception as e:
             log.error(f"Ошибка загрузки @{m['username']}: {e}")
+
+    # УДАЛЯЕМ ВЕБХУК У ГЛАВНОГО БОТА
+    await bot.delete_webhook(drop_pending_updates=True)
 
     # ЗАПУСКАЕМ ВСЕХ БОТОВ ЧЕРЕЗ ОДИН DISPATCHER
     await dp.start_polling(*bots_to_start)
