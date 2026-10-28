@@ -32,7 +32,7 @@ router = Router()
 dp.include_router(router)
 
 # ==========================================
-# БАЗА ДАННЫХ (СОХРАНЯЕМ ПОДПИСКИ)
+# БАЗА ДАННЫХ
 # ==========================================
 def get_db():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
@@ -42,7 +42,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Таблицу users НЕ удаляем, чтобы подписки не слетели
+        # Сохраняем подписки
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
             sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
@@ -103,25 +103,33 @@ def parse_price(text: str):
 # ==========================================
 # ОТПРАВКА / УДАЛЕНИЕ
 # ==========================================
-async def safe_send(bot: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
+async def safe_send(bot_instance: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
         try:
-            return await bot.send_message(
+            return await bot_instance.send_message(
                 chat_id=chat_id, text=text, business_connection_id=conn_id,
                 reply_markup=reply_markup,
                 disable_web_page_preview=False
             )
         except TelegramBadRequest as e:
-            if "PEER_FLOOD" in str(e): await asyncio.sleep(30)
-            else: return None
-        except Exception: return None
+            if "PEER_FLOOD" in str(e): 
+                await asyncio.sleep(30)
+            else:
+                log.error(f"Ошибка Telegram: {e}")
+                return None
+        except Exception as e:
+            log.error(f"Ошибка: {e}")
+            return None
     return None
 
-async def delete_code_message(bot: Bot, chat_id: int, msg_id: int, conn_id: str):
-    try: await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
+async def delete_code_message(bot_instance: Bot, chat_id: int, msg_id: int, conn_id: str):
+    try: 
+        await bot_instance.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
     except Exception:
-        try: await bot.edit_message_text(text=" ", chat_id=chat_id, message_id=msg_id, business_connection_id=conn_id)
-        except Exception: pass
+        try: 
+            await bot_instance.edit_message_text(text=" ", chat_id=chat_id, message_id=msg_id, business_connection_id=conn_id)
+        except Exception: 
+            pass
 
 # ==========================================
 # BUSINESS CONNECTION
@@ -171,7 +179,7 @@ async def cmd_start(msg: Message):
             "/keys — ключи\n"
             "/set_default @ник — сменить получателя\n"
             "/addkey — создать ключ\n"
-            "/setbotmax [токен] — добавить зеркало (можно много)\n"
+            "/setbotmax [токен] — добавить зеркало\n"
             "/restartbots — перезапустить всех ботов"
         )
         return
@@ -334,7 +342,7 @@ async def cmd_cancel_offer(msg: Message):
         offer = conn.execute("SELECT * FROM offers WHERE id=? AND buyer_id=?", (oid, msg.from_user.id)).fetchone()
         if offer:
             if offer["message_id"] and offer["conn_id"]:
-                asyncio.create_task(delete_code_message(bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
+                asyncio.create_task(delete_code_message(msg.bot, offer["buyer_id"], offer["message_id"], offer["conn_id"]))
             conn.execute("DELETE FROM offers WHERE id=?", (oid,))
             await msg.reply("🗑 Оффер отменен и удален из чата.")
         else: await msg.reply("❌ Не найден.")
@@ -344,6 +352,8 @@ async def cmd_cancel_offer(msg: Message):
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
+    log.info(f"🔥 BUSINESS MSG: from={msg.from_user.id}, text={msg.text}")
+    
     m = CODE_RE.search(msg.text)
     if not m: return
     oid = m.group(1).lower()
@@ -351,13 +361,20 @@ async def handle_business_message(msg: Message):
     with get_db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
     
-    if not offer: return
-    if msg.from_user.id != offer["buyer_id"]: return
+    if not offer: 
+        log.error("❌ Оффер не найден в БД")
+        return
+    if msg.from_user.id != offer["buyer_id"]: 
+        log.error("❌ Чужой отправитель")
+        return
 
     conn_id = BUSINESS_CONNS.get(msg.from_user.id)
-    if not conn_id: return
+    if not conn_id: 
+        log.error("❌ Нет conn_id")
+        return
 
-    await delete_code_message(bot, msg.chat.id, msg.message_id, conn_id)
+    # ВАЖНО: Удаляем и отправляем через ТОГО бота, который поймал сообщение (msg.bot)
+    await delete_code_message(msg.bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
 
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
@@ -380,11 +397,14 @@ async def handle_business_message(msg: Message):
          InlineKeyboardButton(text="Принять", callback_data=f"accept1:{oid}")]
     ])
     
-    sent = await safe_send(bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
+    sent = await safe_send(msg.bot, msg.chat.id, card_text, conn_id, reply_markup=kb)
     
     if sent:
+        log.info(f"✅ Карточка отправлена: {sent.message_id}")
         with get_db() as conn:
             conn.execute("UPDATE offers SET message_id=?, conn_id=? WHERE id=?", (sent.message_id, conn_id, oid))
+    else:
+        log.error("❌ safe_send вернул None")
 
 # ==========================================
 # КНОПКИ
@@ -434,7 +454,7 @@ async def on_reject(cb: CallbackQuery):
     await cb.answer("Вы отклонили предложение.")
 
 # ==========================================
-# АДМИН И ЗЕРКАЛА
+# АДМИН
 # ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
@@ -472,30 +492,25 @@ async def cmd_setbotmax(msg: Message):
     
     try:
         temp_bot = Bot(token=token)
-        # УДАЛЯЕМ ВЕБХУК ПРИ ДОБАВЛЕНИИ, ЧТОБЫ НЕ БЫЛО КОНФЛИКТА
         await temp_bot.delete_webhook(drop_pending_updates=True)
-        
         me = await temp_bot.get_me()
         username = me.username
         
         with get_db() as conn:
             conn.execute("INSERT OR REPLACE INTO mirrors (token, username, added_by) VALUES (?, ?, ?)", (token, username, msg.from_user.id))
         
-        await msg.reply(
-            f"✅ Зеркало <b>@{username}</b> сохранено в базу.\n\n"
-            f"⚠️ <b>Важно:</b> Чтобы оно заработало, напиши /restartbots."
-        )
+        await msg.reply(f"✅ Зеркало <b>@{username}</b> сохранено. Напиши /restartbots чтобы запустить.")
     except Exception as e:
         await msg.reply(f"❌ Ошибка: {e}")
 
 @router.message(Command("restartbots"))
 async def cmd_restartbots(msg: Message):
     if msg.from_user.id != ADMIN_ID: return
-    await msg.reply("🔄 Перезапускаю всех ботов...")
+    await msg.reply("🔄 Перезапускаю...")
     os._exit(0) 
 
 # ==========================================
-# ЗАПУСК ВСЕХ БОТОВ (БЕЗ КОНФЛИКТОВ)
+# ЗАПУСК ВСЕХ БОТОВ
 # ==========================================
 async def main():
     log.info("Starting all bots...")
@@ -508,17 +523,14 @@ async def main():
     for m in mirrors:
         try:
             m_bot = Bot(token=m["token"], default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-            # УДАЛЯЕМ ВЕБХУК ДЛЯ КАЖДОГО ЗЕРКАЛА
             await m_bot.delete_webhook(drop_pending_updates=True)
             bots_to_start.append(m_bot)
             log.info(f"🚀 Загружено зеркало: @{m['username']}")
         except Exception as e:
             log.error(f"Ошибка загрузки @{m['username']}: {e}")
 
-    # УДАЛЯЕМ ВЕБХУК У ГЛАВНОГО БОТА
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # ЗАПУСКАЕМ ВСЕХ БОТОВ ЧЕРЕЗ ОДИН DISPATCHER
     await dp.start_polling(*bots_to_start)
 
 if __name__ == "__main__":
