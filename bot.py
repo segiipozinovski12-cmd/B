@@ -106,7 +106,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ГЕНЕРАЦИЯ ДОКАЗАТЕЛЬСТВА (PILLOW)
+# ГЕНЕРАЦИЯ ДОКАЗАТЕЛЬСТВА (ДИНАМИЧЕСКИЕ КООРДИНАТЫ)
 # ==========================================
 def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
     template_path = "IMG_0401.jpg"
@@ -120,30 +120,39 @@ def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
         return output
 
     img = Image.open(template_path)
+    width, height = img.size # Получаем размер картинки
     draw = ImageDraw.Draw(img)
 
-    rect_x1, rect_y1 = 350, 320
-    rect_x2, rect_y2 = 1020, 420
+    # Координаты плашки (в процентах от размера картинки)
+    rect_x1 = int(width * 0.265)
+    rect_y1 = int(height * 0.312)
+    rect_x2 = int(width * 0.730)
+    rect_y2 = int(height * 0.402)
     
     draw.rectangle([rect_x1, rect_y1, rect_x2, rect_y2], fill=(28, 35, 49))
 
-    try:
-        font_large = ImageFont.truetype("arial.ttf", 24)
-        font_small = ImageFont.truetype("arial.ttf", 16)
-        font_price = ImageFont.truetype("arialbd.ttf", 26)
-    except:
-        font_large = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-        font_price = ImageFont.load_default()
+    # Динамический размер шрифта
+    font_large = ImageFont.truetype("arial.ttf", int(width * 0.016))
+    font_small = ImageFont.truetype("arial.ttf", int(width * 0.012))
+    font_price = ImageFont.truetype("arialbd.ttf", int(width * 0.018))
 
     now = datetime.now()
     date_str = f"Сегодня, {now.strftime('%H:%M')}"
     
-    draw.text((370, 335), date_str, fill=(150, 150, 150), font=font_small)
-    draw.text((370, 365), nft_name, fill=(255, 255, 255), font=font_large)
+    # Отступы от краев плашки
+    pad_x = int(width * 0.010)
+    pad_y = int(height * 0.015)
     
+    # Рисуем текст
+    draw.text((rect_x1 + pad_x, rect_y1 + pad_y), date_str, fill=(150, 150, 150), font=font_small)
+    draw.text((rect_x1 + pad_x, rect_y1 + pad_y + int(height * 0.03)), nft_name, fill=(255, 255, 255), font=font_large)
+    
+    # Цена (сдвигаем вправо)
     price_text = f"{price_str} ⭐"
-    draw.text((800, 360), price_text, fill=(255, 255, 255), font=font_price)
+    bbox = draw.textbbox((0, 0), price_text, font=font_price)
+    text_width = bbox[2] - bbox[0]
+    price_x = rect_x1 + int((rect_x2 - rect_x1) * 0.75) - (text_width // 2)
+    draw.text((price_x, rect_y1 + pad_y + int(height * 0.015)), price_text, fill=(255, 255, 255), font=font_price)
 
     output = BytesIO()
     img.save(output, format="PNG")
@@ -231,7 +240,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# МОИ ОФФЕРЫ (ИСПРАВЛЕНО .get)
+# МОИ ОФФЕРЫ
 # ==========================================
 @router.callback_query(F.data == "my_offers_menu")
 async def cb_my_offers_menu(cb: CallbackQuery):
@@ -246,7 +255,7 @@ async def cb_my_offers_menu(cb: CallbackQuery):
     await cb.message.edit_text("📁 <b>Ваши последние офферы:</b>\nВыберите оффер для управления:")
     
     for o in offers:
-        o_dict = dict(o) # Конвертируем в словарь, чтобы работал .get()
+        o_dict = dict(o)
         lang = o_dict.get("lang", "ru")
         lang_name = {"ru": "🇷🇺 RU", "en": "🇺🇸 EN", "it": "🇮🇹 IT", "zh": "🇨🇳 CH"}.get(lang, "RU")
         price_str = f"{o['price_amount']} ⭐️" if o["price_currency"] == "Stars" else f"{o['price_amount']} Gram"
@@ -319,7 +328,7 @@ async def cb_buy_sub(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# КОМАНДЫ КЛИЕНТА
+# КОМАНДЫ
 # ==========================================
 @router.message(Command("key"))
 async def cmd_key(msg: Message):
