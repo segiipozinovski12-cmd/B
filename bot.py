@@ -231,7 +231,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# МОИ ОФФЕРЫ
+# МОИ ОФФЕРЫ (ИСПРАВЛЕНО .get)
 # ==========================================
 @router.callback_query(F.data == "my_offers_menu")
 async def cb_my_offers_menu(cb: CallbackQuery):
@@ -246,7 +246,8 @@ async def cb_my_offers_menu(cb: CallbackQuery):
     await cb.message.edit_text("📁 <b>Ваши последние офферы:</b>\nВыберите оффер для управления:")
     
     for o in offers:
-        lang = o.get("lang", "ru")
+        o_dict = dict(o) # Конвертируем в словарь, чтобы работал .get()
+        lang = o_dict.get("lang", "ru")
         lang_name = {"ru": "🇷🇺 RU", "en": "🇺🇸 EN", "it": "🇮🇹 IT", "zh": "🇨🇳 CH"}.get(lang, "RU")
         price_str = f"{o['price_amount']} ⭐️" if o["price_currency"] == "Stars" else f"{o['price_amount']} Gram"
         
@@ -452,7 +453,8 @@ async def handle_business_message(msg: Message):
     await delete_code_message(msg.bot, msg.chat.id, msg.message_id, conn_id)
     await asyncio.sleep(1.5)
 
-    lang_data = LANGUAGES.get(offer.get("lang", "ru"), LANGUAGES["ru"])
+    offer_dict = dict(offer)
+    lang_data = LANGUAGES.get(offer_dict.get("lang", "ru"), LANGUAGES["ru"])
     price_str = f"{offer['price_amount']} ⭐️" if offer["price_currency"] == "Stars" else f"{offer['price_amount']} Gram"
     nft_link = f"https://t.me/nft/{offer['nft_slug']}"
     hidden_link = f'<a href="{nft_link}">&#8203;</a>'
